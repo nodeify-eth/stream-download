@@ -162,7 +162,7 @@ You can override auto-detection by setting the `COMPRESSION` environment variabl
 
 ## Credits
 
-This project is based on the excellent [init-stream-download](https://github.com/graphops/docker-builds/tree/main/init-stream-download) tool by [GraphOps](https://github.com/graphops). We've extended it to support additional compression formats while maintaining full backward compatibility with the original.
+This project is based on the excellent [init-stream-download](https://github.com/graphops/docker-builds/tree/main) tool by [GraphOps](https://github.com/graphops). We've extended it to support additional compression formats while maintaining full backward compatibility with the original.
 
 ## Advantages Over Original
 
