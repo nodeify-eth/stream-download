@@ -160,6 +160,10 @@ You can override auto-detection by setting the `COMPRESSION` environment variabl
 4. Extracts directly to the target directory
 5. Records a stamp file to prevent re-downloading
 
+## Credits
+
+This project is based on the excellent [init-stream-download](https://github.com/graphops/docker-builds/tree/main/init-stream-download) tool by [GraphOps](https://github.com/graphops). We've extended it to support additional compression formats while maintaining full backward compatibility with the original.
+
 ## Advantages Over Original
 
 - **zstd support**: Can handle modern zstd-compressed snapshots
