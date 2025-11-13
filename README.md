@@ -13,7 +13,7 @@ Enhanced version of the graphops init-stream-download container with support for
 - **Auto-detection**: Automatically detects compression format based on file extension
 - **Chunked downloads**: Downloads large files in configurable chunks for reliability
 - **Progress monitoring**: Shows download and extraction progress with `pv`
-- **Resume support**: Can resume interrupted downloads via stamps
+- **Skip re-download**: Won't re-download if snapshot already completed (via stamp file)
 - **Multiple compression formats**: Supports all major compression formats
 
 ## Environment Variables
