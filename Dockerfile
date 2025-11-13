@@ -16,6 +16,7 @@ RUN apk add --no-cache \
   dumb-init
 
 COPY stream-download.sh /usr/local/bin/stream-download.sh
+RUN chmod +x /usr/local/bin/stream-download.sh
 
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 CMD ["/bin/bash", "-c", "/usr/local/bin/stream-download.sh"]
