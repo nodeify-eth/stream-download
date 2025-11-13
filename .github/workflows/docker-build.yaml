@@ -7,10 +7,18 @@ on:
       - master
     tags:
       - 'v*'
+    paths:
+      - 'Dockerfile'
+      - 'stream-download.sh'
+      - '.github/workflows/**'
   pull_request:
     branches:
       - main
       - master
+    paths:
+      - 'Dockerfile'
+      - 'stream-download.sh'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 env:
