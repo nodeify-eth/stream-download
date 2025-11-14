@@ -23,14 +23,11 @@ TAR_ARGS=${TAR_ARGS-""}
 SUBPATH=${SUBPATH-""}
 RM_SUBPATH=${RM_SUBPATH:-"true"}
 RM_SUBPATH=${RM_SUBPATH,,}
-BUFFER_SIZE=${BUFFER_SIZE:-$((100 * 1024 * 1024))}  # 100MB buffer for extraction
 COMPRESSION=${COMPRESSION:-"auto"}
 MAX_RETRIES=${MAX_RETRIES:-5}
 
-WORK_DIR="${DIR}/._download"
 STAMP="${DIR}/._download.stamp"
 STATE_FILE="${DIR}/._download.state"
-PROGRESS_FILE="${DIR}/._download.progress"
 
 if [[ -f "${STAMP}" && "$(cat "${STAMP}")" = "${URL}" ]]; then
   echo "Already restored, exiting"
@@ -118,39 +115,9 @@ if [[ -f "${STATE_FILE}" ]]; then
   echo "Already completed: ${PERCENT}%"
 fi
 
-mkdir -p "${WORK_DIR}"
 mkdir -p "${DIR}/${SUBPATH}"
 
-# Progress monitoring function (runs in background)
-function monitor_progress {
-  local fifo=$1
-  local last_size=0
-  local last_time=$(date +%s)
-  
-  while [[ -p "${fifo}" ]]; do
-    if [[ -f "${PROGRESS_FILE}" ]]; then
-      local current_size=$(cat "${PROGRESS_FILE}")
-      local current_time=$(date +%s)
-      local elapsed=$((current_time - last_time))
-      
-      if [[ $elapsed -ge 10 ]]; then
-        local downloaded=$((current_size - last_size))
-        local speed=$((downloaded / elapsed))
-        local percent=$((current_size * 100 / FILESIZE))
-        local remaining=$((FILESIZE - current_size))
-        local eta=$((remaining / speed))
-        
-        echo "Progress: ${percent}% | Downloaded: $(numfmt --to=iec-i --suffix=B ${current_size} 2>/dev/null || echo ${current_size}) / $(numfmt --to=iec-i --suffix=B ${FILESIZE} 2>/dev/null || echo ${FILESIZE}) | Speed: $(numfmt --to=iec-i --suffix=B/s ${speed} 2>/dev/null || echo ${speed} B/s) | ETA: ${eta}s"
-        
-        last_size=$current_size
-        last_time=$current_time
-      fi
-    fi
-    sleep 10
-  done
-}
-
-# Download and extract with progress tracking
+# Download and extract with retry logic
 function stream_and_extract {
   local start_pos=$1
   local retries=0
@@ -158,84 +125,32 @@ function stream_and_extract {
   while [[ $retries -lt $MAX_RETRIES ]]; do
     echo "Attempt $((retries + 1))/${MAX_RETRIES}: Starting download and extraction from byte ${start_pos}"
     
-    # Create named pipe for progress monitoring
-    local fifo="${WORK_DIR}/progress.fifo"
-    rm -f "${fifo}"
-    mkfifo "${fifo}"
-    
-    # Start progress monitor in background
-    monitor_progress "${fifo}" &
-    local monitor_pid=$!
-    
     set +e
-    # Stream with curl, track progress, decompress, and extract
     if [[ $start_pos -eq 0 ]]; then
-      # Initial download - no Range header
+      # Initial download - no Range header, show progress with pv
       curl --fail --location --insecure \
         --connect-timeout 30 \
         --speed-limit 10240 --speed-time 60 \
-        "$URL" 2>&1 | \
-        tee >(
-          # Track downloaded bytes
-          dd bs=1M status=none | \
-          awk -v start=$start_pos -v progress="${PROGRESS_FILE}" -v state="${STATE_FILE}" '
-            BEGIN { total=start }
-            {
-              print $0
-              total += length($0)
-              if (NR % 100 == 0) {
-                print total > progress
-                print total > state
-                close(progress)
-                close(state)
-              }
-            }
-            END {
-              print total > progress
-              print total > state
-            }
-          '
-        ) | \
+        "$URL" 2>/dev/null | \
+        pv -f -p -t -e -r -b -s ${FILESIZE} 2>&1 | \
         ${DECOMPRESS_CMD} | \
         tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS}
+      local exit_code=$?
     else
       # Resume download - use Range header
+      local remaining=$((FILESIZE - start_pos))
+      echo "Resuming: downloading remaining ${remaining} bytes"
       curl --fail --location --insecure \
         --connect-timeout 30 \
         --speed-limit 10240 --speed-time 60 \
         --header "Range: bytes=${start_pos}-" \
-        "$URL" 2>&1 | \
-        tee >(
-          # Track downloaded bytes
-          awk -v start=$start_pos -v progress="${PROGRESS_FILE}" -v state="${STATE_FILE}" '
-            BEGIN { total=start }
-            {
-              print $0
-              total += length($0)
-              if (NR % 100 == 0) {
-                print total > progress
-                print total > state
-                close(progress)
-                close(state)
-              }
-            }
-            END {
-              print total > progress
-              print total > state
-            }
-          '
-        ) | \
+        "$URL" 2>/dev/null | \
+        pv -f -p -t -e -r -b -s ${remaining} 2>&1 | \
         ${DECOMPRESS_CMD} | \
         tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS}
+      local exit_code=$?
     fi
-    
-    local exit_code=$?
     set -e
-    
-    # Clean up progress monitor
-    rm -f "${fifo}"
-    kill $monitor_pid 2>/dev/null || true
-    wait $monitor_pid 2>/dev/null || true
     
     if [[ $exit_code -eq 0 ]]; then
       echo "Download and extraction completed successfully"
@@ -244,21 +159,9 @@ function stream_and_extract {
     
     echo "ERROR: Download/extraction failed with exit code ${exit_code}"
     
-    # Check if we made progress
-    if [[ -f "${STATE_FILE}" ]]; then
-      local new_pos=$(cat "${STATE_FILE}")
-      if [[ $new_pos -gt $start_pos ]]; then
-        echo "Made progress: ${start_pos} -> ${new_pos} bytes"
-        start_pos=$new_pos
-        echo "Will retry from byte ${start_pos}"
-        retries=0  # Reset retry counter since we made progress
-      else
-        echo "No progress made, incrementing retry counter"
-        retries=$((retries + 1))
-      fi
-    else
-      retries=$((retries + 1))
-    fi
+    # For resumable approach, we'd need to track bytes downloaded
+    # But tar streaming doesn't allow easy resume, so we just retry
+    retries=$((retries + 1))
     
     if [[ $retries -lt $MAX_RETRIES ]]; then
       echo "Waiting 5 seconds before retry..."
@@ -280,9 +183,7 @@ echo "Recording completion stamp"
 echo "${URL}" > "${STAMP}"
 
 echo "Cleaning up"
-rm -rf "${WORK_DIR}"
 rm -f "${STATE_FILE}"
-rm -f "${PROGRESS_FILE}"
 
 echo "Snapshot restore completed successfully"
 exit 0
