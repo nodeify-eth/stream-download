@@ -143,23 +143,30 @@ function downloadAndVerifyChunk {
     fi
     
     set +e
-    wget --quiet --no-check-certificate -O "${chunkFile}.tmp" \
-      --header="Range: bytes=${startPos}-${endPos}" \
-      --read-timeout=60 "$URL" 2>&1
-    local wget_exit=$?
+    curl --fail --silent --show-error --insecure \
+      --output "${chunkFile}.tmp" \
+      --header "Range: bytes=${startPos}-${endPos}" \
+      --connect-timeout 30 \
+      --max-time 300 \
+      "$URL" 2>&1
+    local curl_exit=$?
     set -e
     
-    if [[ $wget_exit -eq 0 ]]; then
+    if [[ $curl_exit -eq 0 ]]; then
       # Verify we got data
       local downloadedSize="$(stat --format %s "${chunkFile}.tmp" 2>/dev/null || echo 0)"
       if [[ $downloadedSize -gt 0 ]]; then
         mv "${chunkFile}.tmp" "${chunkFile}"
         echo "Chunk ${partNr} downloaded successfully (${downloadedSize} bytes)"
         return 0
+      else
+        echo "Download completed but file is empty for chunk ${partNr}"
       fi
+    else
+      echo "Download failed for chunk ${partNr} with curl exit code: ${curl_exit}"
     fi
     
-    echo "Download failed for chunk ${partNr}, retrying..."
+    echo "Retrying chunk ${partNr}..."
     rm -f "${chunkFile}.tmp"
     retries=$((retries + 1))
     sleep 2
