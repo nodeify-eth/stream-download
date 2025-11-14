@@ -191,7 +191,8 @@ function extractChunk {
     local tar_exit=$?
     set -e
     
-    if [[ $tar_exit -eq 0 ]]; then
+    # Exit code 0 = success, 141 = SIGPIPE from head closing (also success)
+    if [[ $tar_exit -eq 0 || $tar_exit -eq 141 ]]; then
       echo "Chunk ${partNr} extracted successfully"
       touch "${chunkFile}.done"
       rm -f "${chunkFile}"
