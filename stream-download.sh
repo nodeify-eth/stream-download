@@ -122,35 +122,66 @@ function stream_and_extract {
   local start_pos=$1
   local retries=0
   
+  # Background status monitor
+  function status_monitor {
+    local start_time=$(date +%s)
+    local last_size=0
+    
+    while sleep 30; do
+      if [[ -d "${DIR}/${SUBPATH}" ]]; then
+        local current_size=$(du -sb "${DIR}/${SUBPATH}" 2>/dev/null | awk '{print $1}')
+        local current_time=$(date +%s)
+        local elapsed=$((current_time - start_time))
+        local speed=$((current_size / elapsed))
+        
+        if [[ $speed -gt 0 ]]; then
+          local eta=$(( (FILESIZE - current_size) / speed ))
+          echo "Status: Extracted $(numfmt --to=iec-i --suffix=B $current_size 2>/dev/null || echo $current_size) | Speed: $(numfmt --to=iec-i --suffix=B/s $speed 2>/dev/null || echo ${speed}B/s) | ETA: ${eta}s"
+        else
+          echo "Status: Extracted $(numfmt --to=iec-i --suffix=B $current_size 2>/dev/null || echo $current_size)"
+        fi
+      fi
+    done
+  }
+  
   while [[ $retries -lt $MAX_RETRIES ]]; do
     echo "Attempt $((retries + 1))/${MAX_RETRIES}: Starting download and extraction from byte ${start_pos}"
+    
+    # Start status monitor in background
+    status_monitor &
+    local monitor_pid=$!
     
     set +e
     if [[ $start_pos -eq 0 ]]; then
       # Initial download - no Range header, show progress with pv
+      echo "Starting download with progress monitoring..."
       curl --fail --location --insecure \
         --connect-timeout 30 \
         --speed-limit 10240 --speed-time 60 \
         "$URL" 2>/dev/null | \
-        pv -f -p -t -e -r -b -s ${FILESIZE} | \
+        pv -f -p -t -e -r -b -s ${FILESIZE} -i 1 2>&1 | \
         ${DECOMPRESS_CMD} | \
         tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS} 2>/dev/null
       local exit_code=${PIPESTATUS[3]}
     else
       # Resume download - use Range header
       local remaining=$((FILESIZE - start_pos))
-      echo "Resuming: downloading remaining ${remaining} bytes"
+      echo "Resuming: downloading remaining ${remaining} bytes with progress monitoring..."
       curl --fail --location --insecure \
         --connect-timeout 30 \
         --speed-limit 10240 --speed-time 60 \
         --header "Range: bytes=${start_pos}-" \
         "$URL" 2>/dev/null | \
-        pv -f -p -t -e -r -b -s ${remaining} | \
+        pv -f -p -t -e -r -b -s ${remaining} -i 1 2>&1 | \
         ${DECOMPRESS_CMD} | \
         tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS} 2>/dev/null
       local exit_code=${PIPESTATUS[3]}
     fi
     set -e
+    
+    # Stop status monitor
+    kill $monitor_pid 2>/dev/null || true
+    wait $monitor_pid 2>/dev/null || true
     
     if [[ $exit_code -eq 0 ]]; then
       echo "Download and extraction completed successfully"
