@@ -136,9 +136,16 @@ function downloadAndVerifyChunk {
   while [[ $retries -lt $MAX_RETRIES ]]; do
     echo "Downloading chunk ${partNr}/${NR_PARTS} (attempt $((retries + 1))/${MAX_RETRIES})"
     
+    # Calculate end position for this chunk
+    local endPos=$((startPos + CHUNK_SIZE - 1))
+    if [[ $endPos -ge $FILESIZE ]]; then
+      endPos=$((FILESIZE - 1))
+    fi
+    
     set +e
-    wget --quiet --no-check-certificate -O "${chunkFile}.tmp" "$URL" --start-pos "${startPos}" --read-timeout=60 | \
-      head -c "${CHUNK_SIZE}" > "${chunkFile}.tmp" 2>&1
+    wget --quiet --no-check-certificate -O "${chunkFile}.tmp" \
+      --header="Range: bytes=${startPos}-${endPos}" \
+      --read-timeout=60 "$URL" 2>&1
     local wget_exit=$?
     set -e
     
