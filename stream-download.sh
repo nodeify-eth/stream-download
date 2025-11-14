@@ -23,24 +23,23 @@ TAR_ARGS=${TAR_ARGS-""}
 SUBPATH=${SUBPATH-""}
 RM_SUBPATH=${RM_SUBPATH:-"true"}
 RM_SUBPATH=${RM_SUBPATH,,}
-CHUNK_SIZE=${CHUNK_SIZE:-$((1000 * 1000 * 1000))}
+BUFFER_SIZE=${BUFFER_SIZE:-$((100 * 1024 * 1024))}  # 100MB buffer for extraction
 COMPRESSION=${COMPRESSION:-"auto"}
-MAX_RETRIES=${MAX_RETRIES:-3}
+MAX_RETRIES=${MAX_RETRIES:-5}
 
 WORK_DIR="${DIR}/._download"
-CHUNKS_DIR="${DIR}/._download/chunks"
-COMPLETED_CHUNKS_DIR="${DIR}/._download/completed"
 STAMP="${DIR}/._download.stamp"
 STATE_FILE="${DIR}/._download.state"
+PROGRESS_FILE="${DIR}/._download.progress"
 
-if [[ -f "${STAMP}" && "$(cat "${STAMP}")" = "${URL}"  ]]; then
+if [[ -f "${STAMP}" && "$(cat "${STAMP}")" = "${URL}" ]]; then
   echo "Already restored, exiting"
   exit 0
 else
   echo "Preparing to download ${URL}"
 fi
 
-# Fix: Actually remove the directory contents
+# Remove existing subpath if requested and not resuming
 if [[ -d "${DIR}/${SUBPATH}" && "${RM_SUBPATH}" = "true" && ! -f "${STATE_FILE}" ]]; then
   echo "Removing existing subpath: ${DIR}/${SUBPATH}"
   rm -rf "${DIR}/${SUBPATH}"
@@ -106,146 +105,184 @@ case "${COMPRESSION}" in
     ;;
 esac
 
-FILESIZE="$(curl --silent --head "$URL" | grep -i Content-Length | awk '{print $2}' | tr --delete --complement '[:alnum:]' )"
-NR_PARTS=$((FILESIZE / CHUNK_SIZE))
+# Get file size for progress tracking
+FILESIZE="$(curl --silent --head "$URL" | grep -i Content-Length | awk '{print $2}' | tr --delete --complement '[:alnum:]')"
+echo "Total file size: ${FILESIZE} bytes ($(numfmt --to=iec-i --suffix=B ${FILESIZE} 2>/dev/null || echo ${FILESIZE}))"
 
-if ((FILESIZE % CHUNK_SIZE > 0)); then
-  ((NR_PARTS++))
+# Check if we're resuming
+START_BYTE=0
+if [[ -f "${STATE_FILE}" ]]; then
+  START_BYTE=$(cat "${STATE_FILE}")
+  echo "Resuming from byte ${START_BYTE} ($(numfmt --to=iec-i --suffix=B ${START_BYTE} 2>/dev/null || echo ${START_BYTE}))"
+  PERCENT=$((START_BYTE * 100 / FILESIZE))
+  echo "Already completed: ${PERCENT}%"
 fi
 
-echo "Total file size: ${FILESIZE} bytes, ${NR_PARTS} parts"
+mkdir -p "${WORK_DIR}"
+mkdir -p "${DIR}/${SUBPATH}"
 
-function init {
-  mkdir -p "${CHUNKS_DIR}"
-  mkdir -p "${COMPLETED_CHUNKS_DIR}"
-  mkdir -p "${DIR}/${SUBPATH}"
-}
-
-function downloadAndVerifyChunk {
-  local partNr=$1
-  local startPos=$(( (partNr - 1) * CHUNK_SIZE ))
-  local chunkFile="${COMPLETED_CHUNKS_DIR}/chunk.${partNr}"
+# Progress monitoring function (runs in background)
+function monitor_progress {
+  local fifo=$1
+  local last_size=0
+  local last_time=$(date +%s)
   
-  # Skip if already completed
-  if [[ -f "${chunkFile}.done" ]]; then
-    echo "Chunk ${partNr} already completed, skipping"
-    return 0
-  fi
-  
-  local retries=0
-  while [[ $retries -lt $MAX_RETRIES ]]; do
-    echo "Downloading chunk ${partNr}/${NR_PARTS} (attempt $((retries + 1))/${MAX_RETRIES})"
-    
-    # Calculate end position for this chunk
-    local endPos=$((startPos + CHUNK_SIZE - 1))
-    if [[ $endPos -ge $FILESIZE ]]; then
-      endPos=$((FILESIZE - 1))
-    fi
-    
-    set +e
-    curl --fail --silent --show-error --insecure \
-      --output "${chunkFile}.tmp" \
-      --header "Range: bytes=${startPos}-${endPos}" \
-      --connect-timeout 30 \
-      --max-time 300 \
-      "$URL" 2>&1
-    local curl_exit=$?
-    set -e
-    
-    if [[ $curl_exit -eq 0 ]]; then
-      # Verify we got data
-      local downloadedSize="$(stat --format %s "${chunkFile}.tmp" 2>/dev/null || echo 0)"
-      if [[ $downloadedSize -gt 0 ]]; then
-        mv "${chunkFile}.tmp" "${chunkFile}"
-        echo "Chunk ${partNr} downloaded successfully (${downloadedSize} bytes)"
-        return 0
-      else
-        echo "Download completed but file is empty for chunk ${partNr}"
+  while [[ -p "${fifo}" ]]; do
+    if [[ -f "${PROGRESS_FILE}" ]]; then
+      local current_size=$(cat "${PROGRESS_FILE}")
+      local current_time=$(date +%s)
+      local elapsed=$((current_time - last_time))
+      
+      if [[ $elapsed -ge 10 ]]; then
+        local downloaded=$((current_size - last_size))
+        local speed=$((downloaded / elapsed))
+        local percent=$((current_size * 100 / FILESIZE))
+        local remaining=$((FILESIZE - current_size))
+        local eta=$((remaining / speed))
+        
+        echo "Progress: ${percent}% | Downloaded: $(numfmt --to=iec-i --suffix=B ${current_size} 2>/dev/null || echo ${current_size}) / $(numfmt --to=iec-i --suffix=B ${FILESIZE} 2>/dev/null || echo ${FILESIZE}) | Speed: $(numfmt --to=iec-i --suffix=B/s ${speed} 2>/dev/null || echo ${speed} B/s) | ETA: ${eta}s"
+        
+        last_size=$current_size
+        last_time=$current_time
       fi
-    else
-      echo "Download failed for chunk ${partNr} with curl exit code: ${curl_exit}"
     fi
-    
-    echo "Retrying chunk ${partNr}..."
-    rm -f "${chunkFile}.tmp"
-    retries=$((retries + 1))
-    sleep 2
+    sleep 10
   done
-  
-  echo "ERROR: Failed to download chunk ${partNr} after ${MAX_RETRIES} attempts"
-  return 1
 }
 
-function extractChunk {
-  local partNr=$1
-  local chunkFile="${COMPLETED_CHUNKS_DIR}/chunk.${partNr}"
-  
-  if [[ -f "${chunkFile}.done" ]]; then
-    return 0
-  fi
-  
-  if [[ ! -f "${chunkFile}" ]]; then
-    echo "ERROR: Chunk file ${chunkFile} not found"
-    return 1
-  fi
-  
+# Download and extract with progress tracking
+function stream_and_extract {
+  local start_pos=$1
   local retries=0
+  
   while [[ $retries -lt $MAX_RETRIES ]]; do
-    echo "Extracting chunk ${partNr}/${NR_PARTS} (attempt $((retries + 1))/${MAX_RETRIES})"
+    echo "Attempt $((retries + 1))/${MAX_RETRIES}: Starting download and extraction from byte ${start_pos}"
+    
+    # Create named pipe for progress monitoring
+    local fifo="${WORK_DIR}/progress.fifo"
+    rm -f "${fifo}"
+    mkfifo "${fifo}"
+    
+    # Start progress monitor in background
+    monitor_progress "${fifo}" &
+    local monitor_pid=$!
     
     set +e
-    cat "${chunkFile}" | ${DECOMPRESS_CMD} | tar --verbose --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS} 2>&1 | head -20
-    local tar_exit=$?
+    # Stream with curl, track progress, decompress, and extract
+    if [[ $start_pos -eq 0 ]]; then
+      # Initial download - no Range header
+      curl --fail --location --insecure \
+        --connect-timeout 30 \
+        --speed-limit 10240 --speed-time 60 \
+        "$URL" 2>&1 | \
+        tee >(
+          # Track downloaded bytes
+          dd bs=1M status=none | \
+          awk -v start=$start_pos -v progress="${PROGRESS_FILE}" -v state="${STATE_FILE}" '
+            BEGIN { total=start }
+            {
+              print $0
+              total += length($0)
+              if (NR % 100 == 0) {
+                print total > progress
+                print total > state
+                close(progress)
+                close(state)
+              }
+            }
+            END {
+              print total > progress
+              print total > state
+            }
+          '
+        ) | \
+        ${DECOMPRESS_CMD} | \
+        tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS}
+    else
+      # Resume download - use Range header
+      curl --fail --location --insecure \
+        --connect-timeout 30 \
+        --speed-limit 10240 --speed-time 60 \
+        --header "Range: bytes=${start_pos}-" \
+        "$URL" 2>&1 | \
+        tee >(
+          # Track downloaded bytes
+          awk -v start=$start_pos -v progress="${PROGRESS_FILE}" -v state="${STATE_FILE}" '
+            BEGIN { total=start }
+            {
+              print $0
+              total += length($0)
+              if (NR % 100 == 0) {
+                print total > progress
+                print total > state
+                close(progress)
+                close(state)
+              }
+            }
+            END {
+              print total > progress
+              print total > state
+            }
+          '
+        ) | \
+        ${DECOMPRESS_CMD} | \
+        tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS}
+    fi
+    
+    local exit_code=$?
     set -e
     
-    # Exit codes:
-    # 0 = success
-    # 2 = unexpected EOF (expected when chunk splits a tar entry)
-    # 141 = SIGPIPE from head closing (also success)
-    if [[ $tar_exit -eq 0 || $tar_exit -eq 2 || $tar_exit -eq 141 ]]; then
-      echo "Chunk ${partNr} extracted successfully"
-      touch "${chunkFile}.done"
-      rm -f "${chunkFile}"
+    # Clean up progress monitor
+    rm -f "${fifo}"
+    kill $monitor_pid 2>/dev/null || true
+    wait $monitor_pid 2>/dev/null || true
+    
+    if [[ $exit_code -eq 0 ]]; then
+      echo "Download and extraction completed successfully"
       return 0
     fi
     
-    echo "Extraction failed for chunk ${partNr} (exit code: ${tar_exit}), retrying..."
-    retries=$((retries + 1))
-    sleep 2
+    echo "ERROR: Download/extraction failed with exit code ${exit_code}"
+    
+    # Check if we made progress
+    if [[ -f "${STATE_FILE}" ]]; then
+      local new_pos=$(cat "${STATE_FILE}")
+      if [[ $new_pos -gt $start_pos ]]; then
+        echo "Made progress: ${start_pos} -> ${new_pos} bytes"
+        start_pos=$new_pos
+        echo "Will retry from byte ${start_pos}"
+        retries=0  # Reset retry counter since we made progress
+      else
+        echo "No progress made, incrementing retry counter"
+        retries=$((retries + 1))
+      fi
+    else
+      retries=$((retries + 1))
+    fi
+    
+    if [[ $retries -lt $MAX_RETRIES ]]; then
+      echo "Waiting 5 seconds before retry..."
+      sleep 5
+    fi
   done
   
-  echo "ERROR: Failed to extract chunk ${partNr} after ${MAX_RETRIES} attempts"
+  echo "ERROR: Failed after ${MAX_RETRIES} attempts"
   return 1
 }
 
-init
+# Main execution
+if ! stream_and_extract $START_BYTE; then
+  echo "FATAL: Could not complete download and extraction"
+  exit 1
+fi
 
-# Main download and extract loop
-for partNr in $(seq 1 $NR_PARTS); do
-  # Download chunk
-  if ! downloadAndVerifyChunk $partNr; then
-    echo "FATAL: Could not download chunk ${partNr}"
-    exit 1
-  fi
-  
-  # Extract chunk immediately
-  if ! extractChunk $partNr; then
-    echo "FATAL: Could not extract chunk ${partNr}"
-    exit 1
-  fi
-  
-  # Save progress
-  echo "${partNr}" > "${STATE_FILE}"
-  
-  echo "Progress: ${partNr}/${NR_PARTS} chunks completed"
-done
-
-echo "All chunks downloaded and extracted successfully"
 echo "Recording completion stamp"
 echo "${URL}" > "${STAMP}"
 
 echo "Cleaning up"
 rm -rf "${WORK_DIR}"
+rm -f "${STATE_FILE}"
+rm -f "${PROGRESS_FILE}"
 
 echo "Snapshot restore completed successfully"
 exit 0
