@@ -132,10 +132,10 @@ function stream_and_extract {
         --connect-timeout 30 \
         --speed-limit 10240 --speed-time 60 \
         "$URL" 2>/dev/null | \
-        pv -f -p -t -e -r -b -s ${FILESIZE} 2>&1 | \
+        pv -f -p -t -e -r -b -s ${FILESIZE} | \
         ${DECOMPRESS_CMD} | \
-        tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS}
-      local exit_code=$?
+        tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS} 2>/dev/null
+      local exit_code=${PIPESTATUS[3]}
     else
       # Resume download - use Range header
       local remaining=$((FILESIZE - start_pos))
@@ -145,10 +145,10 @@ function stream_and_extract {
         --speed-limit 10240 --speed-time 60 \
         --header "Range: bytes=${start_pos}-" \
         "$URL" 2>/dev/null | \
-        pv -f -p -t -e -r -b -s ${remaining} 2>&1 | \
+        pv -f -p -t -e -r -b -s ${remaining} | \
         ${DECOMPRESS_CMD} | \
-        tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS}
-      local exit_code=$?
+        tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS} 2>/dev/null
+      local exit_code=${PIPESTATUS[3]}
     fi
     set -e
     
