@@ -28,6 +28,10 @@ Enhanced version of the graphops init-stream-download container with support for
 | `TAR_ARGS` | `""` | Additional arguments to pass to tar (e.g., `--strip-components=2`) |
 | `SUBPATH` | `""` | Subdirectory within `DIR` to extract to (e.g., `/data`) |
 | `RM_SUBPATH` | `"true"` | Remove `SUBPATH` directory before extraction (set to `"false"` to keep) |
+| `MAX_RETRIES` | `""` | Control retry attempts (default 3) |
+
+
+
 
 ## Usage
 
