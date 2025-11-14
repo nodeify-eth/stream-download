@@ -198,8 +198,11 @@ function extractChunk {
     local tar_exit=$?
     set -e
     
-    # Exit code 0 = success, 141 = SIGPIPE from head closing (also success)
-    if [[ $tar_exit -eq 0 || $tar_exit -eq 141 ]]; then
+    # Exit codes:
+    # 0 = success
+    # 2 = unexpected EOF (expected when chunk splits a tar entry)
+    # 141 = SIGPIPE from head closing (also success)
+    if [[ $tar_exit -eq 0 || $tar_exit -eq 2 || $tar_exit -eq 141 ]]; then
       echo "Chunk ${partNr} extracted successfully"
       touch "${chunkFile}.done"
       rm -f "${chunkFile}"
