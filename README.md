@@ -1,176 +1,313 @@
-# Init Stream Download - Enhanced
+# Production Streaming Snapshot Restore
 
-Enhanced version of the graphops init-stream-download container with support for:
-- zstd (`.tar.zst`, `.tar.zstd`)
-- lz4 (`.tar.lz4`)
-- gzip (`.tar.gz`, `.tgz`)
-- bzip2 (`.tar.bz2`, `.tbz2`)
-- xz (`.tar.xz`, `.txz`)
-- Plain tar (`.tar`)
+A bulletproof bash script for streaming large tar archives directly to disk with automatic retry logic, stall detection, and progress monitoring.
 
 ## Features
 
-- **Auto-detection**: Automatically detects compression format based on file extension
-- **Chunked downloads**: Downloads large files in configurable chunks for reliability
-- **Progress monitoring**: Shows download and extraction progress with `pv`
-- **Skip re-download**: Won't re-download if snapshot already completed (via stamp file)
-- **Multiple compression formats**: Supports all major compression formats
+- ✅ **Streaming extraction** - Downloads and extracts simultaneously, no temporary files
+- ✅ **Production-grade reliability** - 10 automatic retries with exponential backoff
+- ✅ **Stall detection** - Watchdog automatically kills and retries stalled downloads
+- ✅ **Progress monitoring** - Real-time status updates with speed, ETA, and percentage
+- ✅ **Compression support** - Auto-detects and handles zstd, lz4, gzip, bzip2, xz, and plain tar
+- ✅ **Minimal disk usage** - No temporary tar file, extracts on-the-fly
+- ✅ **Connection resilience** - TCP keepalive, nodelay, and aggressive timeout handling
+
+## Use Cases
+
+Perfect for:
+- Blockchain snapshot restoration (Ethereum, Cosmos, etc.)
+- Large database backups
+- CI/CD deployment of large archives
+- Any scenario where disk space is limited but reliability is critical
+
+## Requirements
+
+- bash 4.0+
+- curl
+- tar
+- Compression tools (zstd, lz4, gzip, bzip2, xz) - only needed if using compressed archives
+- Standard Unix utilities: du, awk, grep, stat, numfmt
+
+## Usage
+
+### Basic Usage
+
+```bash
+export RESTORE_SNAPSHOT=true
+export URL="https://example.com/snapshot.tar"
+export DIR="/data"
+
+./stream-download.sh
+```
+
+### Docker Usage
+
+```dockerfile
+FROM alpine:3.22
+
+RUN apk add --no-cache \
+  bash curl tar \
+  zstd lz4 gzip bzip2 xz \
+  coreutils dumb-init
+
+COPY stream-download.sh /usr/local/bin/stream-download.sh
+RUN chmod +x /usr/local/bin/stream-download.sh
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["/bin/bash", "-c", "/usr/local/bin/stream-download.sh"]
+```
+
+### Kubernetes Usage
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: snapshot-restore
+spec:
+  initContainers:
+  - name: restore-snapshot
+    image: your-image:latest
+    env:
+    - name: RESTORE_SNAPSHOT
+      value: "true"
+    - name: URL
+      value: "https://snapshot.arbitrum.foundation/arb1/classic-archive.tar"
+    - name: DIR
+      value: "/storage"
+    - name: SUBPATH
+      value: "db"
+    - name: TAR_ARGS
+      value: "--strip-components=1"
+    volumeMounts:
+    - name: data
+      mountPath: /storage
+  containers:
+  - name: main
+    image: your-app:latest
+    volumeMounts:
+    - name: data
+      mountPath: /storage
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: your-pvc
+```
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RESTORE_SNAPSHOT` | `false` | Set to `true` to enable snapshot restore |
-| `URL` | - | **Required**. URL of the snapshot to download |
-| `DIR` | - | **Required**. Directory to extract snapshot to |
-| `CHUNK_SIZE` | `1000000000` | Download chunk size in bytes (1GB default) |
+| `URL` | - | **Required.** URL of the snapshot to download |
+| `DIR` | - | **Required.** Directory to extract snapshot to |
+| `SUBPATH` | `""` | Subdirectory within `DIR` to extract to (e.g., `db`) |
+| `TAR_ARGS` | `""` | Additional arguments to pass to tar (e.g., `--strip-components=1`) |
 | `COMPRESSION` | `auto` | Compression format: `auto`, `none`, `gzip`, `bzip2`, `xz`, `zstd`, `lz4` |
-| `TAR_ARGS` | `""` | Additional arguments to pass to tar (e.g., `--strip-components=2`) |
-| `SUBPATH` | `""` | Subdirectory within `DIR` to extract to (e.g., `/data`) |
-| `RM_SUBPATH` | `"true"` | Remove `SUBPATH` directory before extraction (set to `"false"` to keep) |
-| `MAX_RETRIES` | `""` | Control retry attempts (default 3) |
-
-
-
-
-## Usage
-
-### Kubernetes StatefulSet Example (Optimism with zstd)
-
-```yaml
-initContainers:
-  - name: init-download
-    image: your-registry/init-stream-download:latest
-    imagePullPolicy: IfNotPresent
-    securityContext:
-      privileged: true
-    volumeMounts:
-      - name: storage
-        mountPath: /storage
-    env:
-      - name: DIR
-        value: "/storage"
-      - name: RESTORE_SNAPSHOT
-        value: "true"
-      - name: URL
-        value: https://datadirs.optimism.io/mainnet-legacy-archival.tar.zst
-      - name: CHUNK_SIZE
-        value: "5000000000"  # 5GB chunks
-      - name: COMPRESSION
-        value: "auto"  # Will auto-detect .tar.zst
-```
-
-### Kubernetes StatefulSet Example (Scroll with plain tar)
-
-```yaml
-initContainers:
-  - name: init-download
-    image: your-registry/init-stream-download:latest
-    imagePullPolicy: IfNotPresent
-    securityContext:
-      privileged: true
-    volumeMounts:
-      - name: storage
-        mountPath: /storage
-    env:
-      - name: DIR
-        value: "/storage"
-      - name: RESTORE_SNAPSHOT
-        value: "true"
-      - name: URL
-        value: https://scroll-geth-snapshot.s3.us-west-2.amazonaws.com/mpt/latest.tar
-      - name: CHUNK_SIZE
-        value: "5000000000"
-      - name: TAR_ARGS
-        value: "--strip-components=2"
-      - name: SUBPATH
-        value: "/data"
-      - name: RM_SUBPATH
-        value: "true"
-```
-
-### Helm Chart Example (with templating)
-
-```yaml
-initContainers:
-  - name: init-download
-    image: your-registry/init-stream-download:latest
-    env:
-      - name: RESTORE_SNAPSHOT
-        value: "true"
-      - name: URL
-        value: {{ $values.restoreSnapshot.url }}
-      - name: DIR
-        value: "/storage"
-      - name: CHUNK_SIZE
-        value: {{ $values.restoreSnapshot.chunkSize | default "5000000000" | quote }}
-      - name: SUBPATH
-        value: {{ $values.restoreSnapshot.subpath | default "" }}
-      - name: RM_SUBPATH
-        value: {{ $values.restoreSnapshot.cleanSubpath | default "true" | quote }}
-      - name: TAR_ARGS
-        value: {{ $values.restoreSnapshot.tarArgs | default "" | quote }}
-    volumeMounts:
-      - name: storage
-        mountPath: /storage
-```
-
-### Docker Run Example
-
-```bash
-docker run --rm \
-  -v /path/to/storage:/storage \
-  -e RESTORE_SNAPSHOT=true \
-  -e URL=https://example.com/snapshot.tar.zst \
-  -e DIR=/storage \
-  -e CHUNK_SIZE=5000000000 \
-  your-registry/init-stream-download:latest
-```
-
-## Building
-
-```bash
-docker build -t your-registry/init-stream-download:latest .
-docker push your-registry/init-stream-download:latest
-```
-
-### Multi-arch Build (optional)
-
-```bash
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -t your-registry/init-stream-download:latest \
-  --push .
-```
-
-## Compression Format Auto-Detection
-
-The container automatically detects compression format based on file extension:
-
-- `*.tar.zst`, `*.tar.zstd` → zstd
-- `*.tar.lz4` → lz4
-- `*.tar.gz`, `*.tgz` → gzip
-- `*.tar.bz2`, `*.tbz2` → bzip2
-- `*.tar.xz`, `*.txz` → xz
-- `*.tar` → none (plain tar)
-
-You can override auto-detection by setting the `COMPRESSION` environment variable explicitly.
+| `RM_SUBPATH` | `true` | Remove `SUBPATH` directory before extraction (set to `false` to keep) |
+| `MAX_RETRIES` | `10` | Number of retry attempts before giving up |
 
 ## How It Works
 
-1. Downloads the snapshot in configurable chunks
-2. Streams chunks through a named pipe
-3. Decompresses on-the-fly based on detected format
-4. Extracts directly to the target directory
-5. Records a stamp file to prevent re-downloading
+### Streaming Architecture
+
+```
+┌─────────┐    ┌──────────────┐    ┌─────┐    ┌────────────┐
+│  curl   │───▶│ decompressor │───▶│ tar │───▶│ /storage/* │
+└─────────┘    └──────────────┘    └─────┘    └────────────┘
+     │              │                  │              │
+     └──────────────┴──────────────────┴──────────────┘
+                          │
+                    ┌─────▼──────┐
+                    │  monitors  │
+                    │ watchdog + │
+                    │   status   │
+                    └────────────┘
+```
+
+1. **curl** streams data from URL with connection monitoring
+2. **decompressor** (if needed) decompresses on-the-fly
+3. **tar** extracts files directly to disk
+4. **monitors** track progress and detect stalls
+
+### Retry Logic
+
+- **Automatic retry** - Up to 10 attempts with exponential backoff (10s, 20s, 30s...)
+- **Stall detection** - Watchdog kills download if no progress for 3 minutes
+- **Connection monitoring** - curl aborts if speed drops below 100KB/s for 3 minutes
+
+### Progress Monitoring
+
+Updates every 30 seconds showing:
+```
+Status: 45% | 278GiB / 613GiB | Speed: 245MiB/s | ETA: 23m
+```
+
+Warnings on stall:
+```
+WARNING: No progress detected for 1 minute(s) (278GiB extracted)
+WARNING: No progress detected for 2 minute(s) (278GiB extracted)
+WARNING: No progress detected for 3 minute(s) (278GiB extracted)
+WATCHDOG: Detected stall for 3 minutes, killing download to trigger retry
+```
+
+## Examples
+
+### Arbitrum Snapshot Restoration
+
+```bash
+export RESTORE_SNAPSHOT=true
+export URL="https://snapshot.arbitrum.foundation/arb1/classic-archive.tar"
+export DIR="/storage"
+export SUBPATH="db"
+export TAR_ARGS="--strip-components=1"
+
+./stream-download.sh
+```
+
+### Compressed Snapshot with Custom Settings
+
+```bash
+export RESTORE_SNAPSHOT=true
+export URL="https://example.com/snapshot.tar.zst"
+export DIR="/data"
+export COMPRESSION="zstd"  # or use "auto" to auto-detect
+export MAX_RETRIES=5
+
+./stream-download.sh
+```
+
+### Skip Existing Data
+
+```bash
+export RESTORE_SNAPSHOT=true
+export URL="https://example.com/snapshot.tar"
+export DIR="/data"
+export SUBPATH="database"
+export RM_SUBPATH="false"  # Don't delete existing data
+
+./stream-download.sh
+```
+
+## Troubleshooting
+
+### Download keeps failing
+
+**Check connection stability:**
+```bash
+# Test download speed
+curl -o /dev/null https://your-snapshot-url.tar
+
+# Check if server supports HTTP keepalive
+curl -I https://your-snapshot-url.tar | grep -i "keep-alive"
+```
+
+**Increase retry attempts:**
+```bash
+export MAX_RETRIES=20
+```
+
+### Stalls frequently
+
+The watchdog detects stalls after 3 minutes of no progress. If your connection is very slow but stable:
+
+**Option 1:** Accept longer extraction time - the watchdog will trigger retry
+**Option 2:** Use the chunked download version instead (see below)
+
+### Out of disk space
+
+This script uses minimal space (extracts on-the-fly), but you need enough space for the extracted data.
+
+**Check space:**
+```bash
+df -h /storage
+```
+
+**If you need resume capability and have extra space**, use the chunked download version instead.
+
+## Limitations
+
+### No Resume Capability
+
+⚠️ **Important:** This streaming approach cannot resume from a specific byte position. If the download fails, it restarts from the beginning.
+
+**Why?** Tar archives must be read sequentially. Jumping to a mid-point causes tar to see garbage data and fail to extract correctly.
+
+**Mitigation:**
+- 10 retry attempts
+- Stall detection and auto-recovery
+- Connection monitoring
+- Most downloads succeed on first attempt with good internet
+
+### Acceptance of Trade-offs
+
+This streaming approach prioritizes:
+- ✅ Minimal disk space usage
+- ✅ Immediate file availability
+- ✅ Simple, predictable behavior
+
+The trade-off is that failed downloads restart from the beginning. However, with 10 retry attempts, stall detection, and connection monitoring, the vast majority of downloads complete successfully on the first attempt.
+
+## Performance
+
+### Typical Performance
+
+| Snapshot Size | Network Speed | Extraction Time |
+|---------------|---------------|-----------------|
+| 100GB | 100Mbps | ~2.5 hours |
+| 500GB | 100Mbps | ~12 hours |
+| 1TB | 1Gbps | ~2.5 hours |
+
+### Bottlenecks
+
+- **Network** - Usually the limiting factor
+- **Disk I/O** - Can bottleneck on slow disks (HDD vs SSD)
+- **CPU** - Decompression (zstd, lz4) can be CPU-intensive
+
+## Security Considerations
+
+- Uses `--insecure` flag for curl (skips SSL verification)
+- Consider using `--cacert` instead for production with proper SSL
+- No authentication - assumes public snapshot URLs
+- No integrity verification - consider adding checksums
+
+## Advanced Configuration
+
+### Custom curl Options
+
+Edit the script to add curl options:
+
+```bash
+curl --fail --location \
+  --cacert /path/to/ca-bundle.crt \  # Add SSL verification
+  --speed-limit 102400 \
+  --speed-time 180 \
+  "$URL" | ...
+```
+
+### Custom Watchdog Timing
+
+Edit stall detection threshold:
+
+```bash
+# In watchdog function
+local max_stalls=5  # Wait 5 minutes instead of 3
+```
+
+### Disable Watchdog
+
+Comment out watchdog in stream_and_extract function:
+
+```bash
+# watchdog &
+# local watchdog_pid=$!
+```
+
+## Support
+
+For issues, questions, or contributions, please refer to your internal documentation or contact your DevOps team.
+
 
 ## Credits
 
 This project is based on the excellent [init-stream-download](https://github.com/graphops/docker-builds/tree/main) tool by [GraphOps](https://github.com/graphops). We've extended it to support additional compression formats while maintaining full backward compatibility with the original.
-
-## Advantages Over Original
-
-- **zstd support**: Can handle modern zstd-compressed snapshots
-- **lz4 support**: Can handle lz4-compressed snapshots
-- **Auto-detection**: No need to manually specify compression format
-- **Better compatibility**: Works with more snapshot sources
