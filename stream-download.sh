@@ -23,14 +23,10 @@ TAR_ARGS=${TAR_ARGS-""}
 SUBPATH=${SUBPATH-""}
 RM_SUBPATH=${RM_SUBPATH:-"true"}
 RM_SUBPATH=${RM_SUBPATH,,}
-CHUNK_SIZE=${CHUNK_SIZE:-$((1000 * 1000 * 1000))}  # 1GB chunks (default)
 COMPRESSION=${COMPRESSION:-"auto"}
-MAX_RETRIES=${MAX_RETRIES:-3}
+MAX_RETRIES=${MAX_RETRIES:-10}  # More retries for production
 
-WORK_DIR="${DIR}/._download"
-TAR_FILE="${WORK_DIR}/archive.tar"
 STAMP="${DIR}/._download.stamp"
-STATE_FILE="${DIR}/._download.state"
 
 if [[ -f "${STAMP}" && "$(cat "${STAMP}")" = "${URL}" ]]; then
   echo "Already restored, exiting"
@@ -39,21 +35,11 @@ else
   echo "Preparing to download ${URL}"
 fi
 
-# Remove existing subpath if requested and not resuming
-if [[ -d "${DIR}/${SUBPATH}" && "${RM_SUBPATH}" = "true" && ! -f "${STATE_FILE}" ]]; then
+# Remove existing subpath if requested
+if [[ -d "${DIR}/${SUBPATH}" && "${RM_SUBPATH}" = "true" ]]; then
   echo "Removing existing subpath: ${DIR}/${SUBPATH}"
   rm -rf "${DIR}/${SUBPATH}"
 fi
-
-# Get file size
-FILESIZE="$(curl --silent --head "$URL" | grep -i Content-Length | awk '{print $2}' | tr --delete --complement '[:alnum:]')"
-NR_PARTS=$((FILESIZE / CHUNK_SIZE))
-if ((FILESIZE % CHUNK_SIZE > 0)); then
-  ((NR_PARTS++))
-fi
-
-echo "Total file size: ${FILESIZE} bytes ($(numfmt --to=iec-i --suffix=B ${FILESIZE} 2>/dev/null || echo ${FILESIZE}))"
-echo "Will download in ${NR_PARTS} chunks of ~$(numfmt --to=iec-i --suffix=B ${CHUNK_SIZE} 2>/dev/null || echo ${CHUNK_SIZE})"
 
 # Auto-detect compression
 if [[ "${COMPRESSION}" = "auto" ]]; then
@@ -115,90 +101,145 @@ case "${COMPRESSION}" in
     ;;
 esac
 
-mkdir -p "${WORK_DIR}"
+# Get file size for info
+FILESIZE="$(curl --silent --head "$URL" | grep -i Content-Length | awk '{print $2}' | tr --delete --complement '[:alnum:]')"
+echo "Total file size: ${FILESIZE} bytes ($(numfmt --to=iec-i --suffix=B ${FILESIZE} 2>/dev/null || echo ${FILESIZE}))"
+
 mkdir -p "${DIR}/${SUBPATH}"
 
-# Download chunk with retry
-function downloadChunk {
-  local partNr=$1
-  local startPos=$(( (partNr - 1) * CHUNK_SIZE ))
-  local endPos=$((startPos + CHUNK_SIZE - 1))
+# Watchdog to detect stalls
+function watchdog {
+  local last_size=0
+  local stall_count=0
+  local max_stalls=3
   
-  if [[ $endPos -ge $FILESIZE ]]; then
-    endPos=$((FILESIZE - 1))
-  fi
+  while sleep 60; do
+    if [[ -d "${DIR}/${SUBPATH}" ]]; then
+      local current_size=$(du -sb "${DIR}/${SUBPATH}" 2>/dev/null | awk '{print $1}')
+      
+      if [[ $current_size -eq $last_size ]]; then
+        stall_count=$((stall_count + 1))
+        echo "WARNING: No progress detected for ${stall_count} minute(s) ($(numfmt --to=iec-i --suffix=B $current_size 2>/dev/null || echo $current_size) extracted)"
+        
+        if [[ $stall_count -ge $max_stalls ]]; then
+          echo "WATCHDOG: Detected stall for ${max_stalls} minutes, killing download to trigger retry"
+          pkill -P $$ curl || true
+          return 1
+        fi
+      else
+        if [[ $stall_count -gt 0 ]]; then
+          echo "Progress resumed ($(numfmt --to=iec-i --suffix=B $current_size 2>/dev/null || echo $current_size) extracted)"
+        fi
+        stall_count=0
+      fi
+      
+      last_size=$current_size
+    fi
+  done
+}
+
+# Status monitor
+function status_monitor {
+  local start_time=$(date +%s)
+  local last_size=0
   
+  while sleep 30; do
+    if [[ -d "${DIR}/${SUBPATH}" ]]; then
+      local current_size=$(du -sb "${DIR}/${SUBPATH}" 2>/dev/null | awk '{print $1}')
+      local current_time=$(date +%s)
+      local elapsed=$((current_time - start_time))
+      
+      if [[ $elapsed -gt 0 && $current_size -gt 0 ]]; then
+        local speed=$((current_size / elapsed))
+        
+        if [[ $speed -gt 0 ]]; then
+          local remaining=$((FILESIZE - current_size))
+          local eta=$((remaining / speed))
+          local progress=$((current_size * 100 / FILESIZE))
+          echo "Status: ${progress}% | $(numfmt --to=iec-i --suffix=B $current_size 2>/dev/null || echo $current_size) / $(numfmt --to=iec-i --suffix=B $FILESIZE 2>/dev/null || echo $FILESIZE) | Speed: $(numfmt --to=iec-i --suffix=B/s $speed 2>/dev/null || echo ${speed}B/s) | ETA: $((eta / 60))m"
+        else
+          echo "Status: $(numfmt --to=iec-i --suffix=B $current_size 2>/dev/null || echo $current_size) extracted"
+        fi
+      fi
+    fi
+  done
+}
+
+# Download and extract with robust retry logic
+function stream_and_extract {
   local retries=0
+  
   while [[ $retries -lt $MAX_RETRIES ]]; do
-    echo "Downloading chunk ${partNr}/${NR_PARTS} (attempt $((retries + 1))/${MAX_RETRIES})"
+    echo "=========================================="
+    echo "Attempt $((retries + 1))/${MAX_RETRIES}: Starting download and extraction"
+    echo "=========================================="
+    
+    # Start monitors in background
+    status_monitor &
+    local status_pid=$!
+    
+    watchdog &
+    local watchdog_pid=$!
     
     set +e
-    curl --fail --silent --insecure \
-      --output "${TAR_FILE}.part${partNr}" \
-      --header "Range: bytes=${startPos}-${endPos}" \
-      --connect-timeout 30 \
-      --max-time 600 \
-      "$URL"
+    curl --fail --location --insecure \
+      --connect-timeout 60 \
+      --max-time 0 \
+      --speed-limit 102400 \
+      --speed-time 180 \
+      --keepalive-time 60 \
+      --tcp-nodelay \
+      --compressed \
+      "$URL" 2>/dev/null | \
+      ${DECOMPRESS_CMD} | \
+      tar --extract --ignore-zeros --warning=no-timestamp --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS} 2>/dev/null
+    
     local exit_code=$?
     set -e
     
+    # Stop monitors
+    kill $status_pid 2>/dev/null || true
+    kill $watchdog_pid 2>/dev/null || true
+    wait $status_pid 2>/dev/null || true
+    wait $watchdog_pid 2>/dev/null || true
+    
     if [[ $exit_code -eq 0 ]]; then
-      local size=$(stat --format %s "${TAR_FILE}.part${partNr}")
-      echo "Chunk ${partNr} downloaded successfully (${size} bytes)"
+      echo "=========================================="
+      echo "Download and extraction completed successfully!"
+      echo "=========================================="
       return 0
     fi
     
-    echo "Download failed for chunk ${partNr}, retrying..."
-    rm -f "${TAR_FILE}.part${partNr}"
+    echo "=========================================="
+    echo "ERROR: Download/extraction failed with exit code ${exit_code}"
+    echo "=========================================="
+    
     retries=$((retries + 1))
-    sleep 2
+    
+    if [[ $retries -lt $MAX_RETRIES ]]; then
+      local wait_time=$((retries * 10))
+      echo "Waiting ${wait_time} seconds before retry $((retries + 1))/${MAX_RETRIES}..."
+      sleep $wait_time
+    fi
   done
   
-  echo "ERROR: Failed to download chunk ${partNr}"
+  echo "=========================================="
+  echo "ERROR: Failed after ${MAX_RETRIES} attempts"
+  echo "=========================================="
   return 1
 }
 
-# Check if we're resuming
-START_CHUNK=1
-if [[ -f "${STATE_FILE}" ]]; then
-  START_CHUNK=$(cat "${STATE_FILE}")
-  echo "Resuming from chunk ${START_CHUNK}/${NR_PARTS}"
+# Main execution
+if ! stream_and_extract; then
+  echo "FATAL: Could not complete download and extraction after ${MAX_RETRIES} attempts"
+  exit 1
 fi
-
-# Download all chunks
-for partNr in $(seq $START_CHUNK $NR_PARTS); do
-  if [[ -f "${TAR_FILE}.part${partNr}" ]]; then
-    echo "Chunk ${partNr} already exists, skipping download"
-  else
-    if ! downloadChunk $partNr; then
-      echo "FATAL: Could not download chunk ${partNr}"
-      exit 1
-    fi
-  fi
-  
-  # Append chunk to tar file immediately and delete it
-  echo "Appending chunk ${partNr}/${NR_PARTS} to tar file"
-  cat "${TAR_FILE}.part${partNr}" >> "${TAR_FILE}"
-  rm -f "${TAR_FILE}.part${partNr}"
-  
-  # Save progress
-  echo "$((partNr + 1))" > "${STATE_FILE}"
-  echo "Progress: ${partNr}/${NR_PARTS} chunks downloaded and appended"
-done
-
-echo "All chunks assembled into tar file ($(stat --format %s "${TAR_FILE}") bytes), extracting..."
-
-# Extract the complete tar file (with decompression if needed)
-${DECOMPRESS_CMD} < "${TAR_FILE}" | tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS} 2>/dev/null || \
-  ${DECOMPRESS_CMD} < "${TAR_FILE}" | tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS}
-
-echo "Extraction complete, cleaning up..."
-rm -f "${TAR_FILE}"
-rm -rf "${WORK_DIR}"
-rm -f "${STATE_FILE}"
 
 echo "Recording completion stamp"
 echo "${URL}" > "${STAMP}"
 
+echo "=========================================="
 echo "Snapshot restore completed successfully"
+echo "Final size: $(du -sh ${DIR}/${SUBPATH} 2>/dev/null || echo 'unknown')"
+echo "=========================================="
 exit 0
