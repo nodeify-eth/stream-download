@@ -176,22 +176,17 @@ for partNr in $(seq $START_CHUNK $NR_PARTS); do
     fi
   fi
   
-  # Save progress
-  echo "$((partNr + 1))" > "${STATE_FILE}"
-  echo "Progress: ${partNr}/${NR_PARTS} chunks downloaded"
-done
-
-echo "All chunks downloaded, assembling tar file..."
-
-# Assemble the tar file
-rm -f "${TAR_FILE}"
-for partNr in $(seq 1 $NR_PARTS); do
-  echo "Appending chunk ${partNr}/${NR_PARTS}"
+  # Append chunk to tar file immediately and delete it
+  echo "Appending chunk ${partNr}/${NR_PARTS} to tar file"
   cat "${TAR_FILE}.part${partNr}" >> "${TAR_FILE}"
   rm -f "${TAR_FILE}.part${partNr}"
+  
+  # Save progress
+  echo "$((partNr + 1))" > "${STATE_FILE}"
+  echo "Progress: ${partNr}/${NR_PARTS} chunks downloaded and appended"
 done
 
-echo "Tar file assembled ($(stat --format %s "${TAR_FILE}") bytes), extracting..."
+echo "All chunks assembled into tar file ($(stat --format %s "${TAR_FILE}") bytes), extracting..."
 
 # Extract the complete tar file (with decompression if needed)
 ${DECOMPRESS_CMD} < "${TAR_FILE}" | tar --extract --ignore-zeros --file - --directory "${DIR}/${SUBPATH}" ${TAR_ARGS} 2>/dev/null || \
