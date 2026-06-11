@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 )
 
+const StampFileName = ".stream-download.stamp"
+
 type Stamp struct {
 	SnapshotID  string `json:"snapshot_id"`
 	Source      string `json:"source"`
@@ -50,17 +52,36 @@ func PrepareTarget(target string, wipe bool) error {
 	if err != nil {
 		return err
 	}
-	if len(entries) == 0 {
+	if hasNoRestoredContent(entries) {
 		return nil
 	}
 	if !wipe {
 		return errors.New("target is non-empty; set WIPE_EXISTING=true to replace")
 	}
 	for _, entry := range entries {
+		if preserveOnWipe(entry.Name()) {
+			continue
+		}
 		p := filepath.Join(target, entry.Name())
 		if err := os.RemoveAll(p); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func hasNoRestoredContent(entries []os.DirEntry) bool {
+	for _, entry := range entries {
+		switch entry.Name() {
+		case "lost+found", StampFileName:
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func preserveOnWipe(name string) bool {
+	return name == "lost+found"
 }

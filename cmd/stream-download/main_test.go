@@ -130,6 +130,43 @@ func TestRunUsesHTTPRangesWhenContentLengthKnown(t *testing.T) {
 	}
 }
 
+func TestRunLogsRestoreProgress(t *testing.T) {
+	archive := gzipTar(t, "db/file.txt", "progress")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"progress-snap"`)
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(archive)-1, len(archive)))
+		w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	var stdout bytes.Buffer
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                filepath.Join(t.TempDir(), "data"),
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL,
+		"COMPRESSION":        "gzip",
+		"RANGE_SIZE":         "1MiB",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, &stdout, os.Stderr); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, `"event":"restore_progress"`) {
+		t.Fatalf("restore_progress event missing from output: %s", out)
+	}
+	if !strings.Contains(out, `"compressed_bytes_read"`) {
+		t.Fatalf("compressed byte count missing from output: %s", out)
+	}
+}
+
 func TestRunFallsBackToSingleGETWithoutStrongHTTPIdentity(t *testing.T) {
 	archive := gzipTar(t, "db/file.txt", "single-get")
 	var sawRange bool

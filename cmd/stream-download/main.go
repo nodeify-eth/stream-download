@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/nodeify-eth/stream-download/internal/config"
 	"github.com/nodeify-eth/stream-download/internal/decompress"
@@ -48,7 +49,7 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 	target := filepath.Join(cfg.Dir, cfg.Subpath)
 	sourceName := snapshotSourceName(cfg)
 	compression := compressionFor(cfg.Compression, sourceName)
-	stampPath := filepath.Join(cfg.Dir, ".stream-download.stamp")
+	stampPath := filepath.Join(cfg.Dir, restore.StampFileName)
 	stamp := restore.Stamp{
 		Source:      sourceName,
 		Checksum:    cfg.ChecksumSHA256,
@@ -68,13 +69,21 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 	if err := os.MkdirAll(staging, 0755); err != nil {
 		return err
 	}
-	logger.Info("start_restore", logx.Fields{"source_kind": "http"})
-
-	stream, cleanup, err := openSnapshotStream(context.Background(), cfg)
+	stream, cleanup, meta, err := openSnapshotStream(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
+	logger.Info("start_restore", logx.Fields{
+		"source_kind":          meta.sourceKind,
+		"source_size_bytes":    meta.sourceSize,
+		"range_mode":           meta.rangeMode,
+		"range_size_bytes":     cfg.RangeSize,
+		"download_concurrency": cfg.DownloadConcurrency,
+		"compression":          compression,
+		"target":               target,
+	})
+	stream = newProgressReader(stream, logger, meta)
 
 	var checksum hash.Hash
 	if cfg.ChecksumSHA256 != "" {
@@ -142,38 +151,48 @@ var newS3Source = func(ctx context.Context, bucket, key, endpoint string) (sourc
 	return source.NewDefaultS3(ctx, bucket, key, endpoint)
 }
 
-func openSnapshotStream(ctx context.Context, cfg config.Config) (io.Reader, func(), error) {
+type streamMetadata struct {
+	sourceKind string
+	sourceSize int64
+	rangeMode  bool
+}
+
+func openSnapshotStream(ctx context.Context, cfg config.Config) (io.Reader, func(), streamMetadata, error) {
 	src, err := sourceFromConfig(ctx, cfg)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, func() {}, streamMetadata{}, err
 	}
 	id, err := src.Resolve(ctx)
 	if err == nil && id.Size > 0 && canUseRangeIdentity(id, cfg.AllowWeakIdentity) {
 		rc, err := spool.StreamRanges(ctx, src, id, cfg.RangeSize, cfg.DownloadConcurrency, cfg.ScratchDir)
 		if err != nil {
-			return nil, func() {}, err
+			return nil, func() {}, streamMetadata{}, err
 		}
-		return rc, func() { _ = rc.Close() }, nil
+		return rc, func() { _ = rc.Close() }, streamMetadata{sourceKind: id.Kind, sourceSize: id.Size, rangeMode: true}, nil
 	}
 	if cfg.S3Bucket != "" {
 		if err != nil {
-			return nil, func() {}, err
+			return nil, func() {}, streamMetadata{}, err
 		}
-		return nil, func() {}, fmt.Errorf("S3 source size must be known")
+		return nil, func() {}, streamMetadata{}, fmt.Errorf("S3 source size must be known")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.SnapshotURLs[0], nil)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, func() {}, streamMetadata{}, err
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, func() {}, streamMetadata{}, err
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		res.Body.Close()
-		return nil, func() {}, fmt.Errorf("GET returned HTTP %d", res.StatusCode)
+		return nil, func() {}, streamMetadata{}, fmt.Errorf("GET returned HTTP %d", res.StatusCode)
 	}
-	return res.Body, func() { _ = res.Body.Close() }, nil
+	size := int64(0)
+	if err == nil && id.Size > 0 {
+		size = id.Size
+	}
+	return res.Body, func() { _ = res.Body.Close() }, streamMetadata{sourceKind: "http", sourceSize: size}, nil
 }
 
 func canUseRangeIdentity(id source.Identity, allowWeak bool) bool {
@@ -207,4 +226,57 @@ func moveChildren(src, dst string) error {
 		}
 	}
 	return nil
+}
+
+type progressReader struct {
+	r        io.Reader
+	logger   *logx.Logger
+	meta     streamMetadata
+	started  time.Time
+	lastLog  time.Time
+	read     int64
+	complete bool
+}
+
+func newProgressReader(r io.Reader, logger *logx.Logger, meta streamMetadata) io.Reader {
+	return &progressReader{r: r, logger: logger, meta: meta}
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	now := time.Now()
+	if p.started.IsZero() {
+		p.started = now
+	}
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.read += int64(n)
+		p.log(now, false)
+	}
+	if err == io.EOF && !p.complete {
+		p.complete = true
+		p.log(time.Now(), true)
+	}
+	return n, err
+}
+
+func (p *progressReader) log(now time.Time, complete bool) {
+	if !complete && !p.lastLog.IsZero() && now.Sub(p.lastLog) < 30*time.Second {
+		return
+	}
+	p.lastLog = now
+	fields := logx.Fields{
+		"compressed_bytes_read": p.read,
+		"source_size_bytes":     p.meta.sourceSize,
+		"source_kind":           p.meta.sourceKind,
+		"range_mode":            p.meta.rangeMode,
+		"elapsed_seconds":       int64(now.Sub(p.started).Seconds()),
+	}
+	if p.meta.sourceSize > 0 {
+		fields["percent_complete"] = float64(p.read) * 100 / float64(p.meta.sourceSize)
+	}
+	if complete {
+		p.logger.Info("restore_stream_complete", fields)
+		return
+	}
+	p.logger.Info("restore_progress", fields)
 }
