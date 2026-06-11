@@ -264,15 +264,28 @@ func (p *progressReader) log(now time.Time, complete bool) {
 		return
 	}
 	p.lastLog = now
+	elapsed := now.Sub(p.started).Seconds()
+	if elapsed <= 0 {
+		elapsed = 0.001
+	}
+	bytesPerSecond := float64(p.read) / elapsed
 	fields := logx.Fields{
 		"compressed_bytes_read": p.read,
 		"source_size_bytes":     p.meta.sourceSize,
 		"source_kind":           p.meta.sourceKind,
 		"range_mode":            p.meta.rangeMode,
-		"elapsed_seconds":       int64(now.Sub(p.started).Seconds()),
+		"elapsed_seconds":       int64(elapsed),
+		"bytes_per_second":      bytesPerSecond,
 	}
 	if p.meta.sourceSize > 0 {
 		fields["percent_complete"] = float64(p.read) * 100 / float64(p.meta.sourceSize)
+		remaining := p.meta.sourceSize - p.read
+		if remaining < 0 {
+			remaining = 0
+		}
+		if bytesPerSecond > 0 {
+			fields["eta_seconds"] = int64(float64(remaining) / bytesPerSecond)
+		}
 	}
 	if complete {
 		p.logger.Info("restore_stream_complete", fields)

@@ -165,6 +165,12 @@ func TestRunLogsRestoreProgress(t *testing.T) {
 	if !strings.Contains(out, `"compressed_bytes_read"`) {
 		t.Fatalf("compressed byte count missing from output: %s", out)
 	}
+	if !strings.Contains(out, `"bytes_per_second"`) {
+		t.Fatalf("transfer rate missing from output: %s", out)
+	}
+	if !strings.Contains(out, `"eta_seconds"`) {
+		t.Fatalf("ETA missing from output: %s", out)
+	}
 }
 
 func TestRunFallsBackToSingleGETWithoutStrongHTTPIdentity(t *testing.T) {
