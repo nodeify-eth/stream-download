@@ -15,6 +15,7 @@ import (
 	"github.com/nodeify-eth/stream-download/internal/logx"
 	"github.com/nodeify-eth/stream-download/internal/restore"
 	"github.com/nodeify-eth/stream-download/internal/source"
+	"github.com/nodeify-eth/stream-download/internal/spool"
 )
 
 func main() {
@@ -85,7 +86,7 @@ func openSnapshotStream(ctx context.Context, cfg config.Config) (io.Reader, func
 	src := source.NewHTTP(cfg.SnapshotURLs[0], http.DefaultClient)
 	id, err := src.Resolve(ctx)
 	if err == nil && id.Size > 0 {
-		rc, _, err := src.ReadRange(ctx, source.Range{Start: 0, End: id.Size - 1}, id)
+		rc, err := spool.StreamRanges(ctx, src, id, cfg.RangeSize, cfg.DownloadConcurrency, cfg.ScratchDir)
 		if err != nil {
 			return nil, func() {}, err
 		}

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,11 +28,11 @@ func TestRunRestoresSmallGzipTar(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "data")
 	scratch := filepath.Join(t.TempDir(), "scratch")
 	env := map[string]string{
-		"RESTORE_SNAPSHOT":  "true",
-		"DIR":               dir,
-		"SCRATCH_DIR":       scratch,
-		"SNAPSHOT_URL":      srv.URL,
-		"COMPRESSION":       "gzip",
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        scratch,
+		"SNAPSHOT_URL":       srv.URL,
+		"COMPRESSION":        "gzip",
 		"REQUIRE_MOUNTPOINT": "false",
 	}
 	if err := run(env, os.Stdout, os.Stderr); err != nil {
@@ -51,13 +52,14 @@ func TestRunUsesHTTPRangesWhenContentLengthKnown(t *testing.T) {
 	var sawRange bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"range-snap"`)
-		w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
 		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
 			return
 		}
 		if r.Header.Get("Range") != "" {
 			sawRange = true
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(archive)-1, len(archive)))
+			w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
 			w.WriteHeader(http.StatusPartialContent)
 			_, _ = w.Write(archive)
 			return
@@ -68,12 +70,12 @@ func TestRunUsesHTTPRangesWhenContentLengthKnown(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "data")
 	env := map[string]string{
-		"RESTORE_SNAPSHOT":  "true",
-		"DIR":               dir,
-		"SCRATCH_DIR":       filepath.Join(t.TempDir(), "scratch"),
-		"SNAPSHOT_URL":      srv.URL,
-		"COMPRESSION":       "gzip",
-		"RANGE_SIZE":        "1MiB",
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL,
+		"COMPRESSION":        "gzip",
+		"RANGE_SIZE":         "1MiB",
 		"REQUIRE_MOUNTPOINT": "false",
 	}
 	if err := run(env, os.Stdout, os.Stderr); err != nil {
@@ -88,6 +90,55 @@ func TestRunUsesHTTPRangesWhenContentLengthKnown(t *testing.T) {
 	}
 	if string(got) != "range" {
 		t.Fatalf("restored file = %q", got)
+	}
+}
+
+func TestRunSplitsKnownObjectIntoMultipleRanges(t *testing.T) {
+	want := strings.Repeat("range-data-", 200)
+	archive := gzipTar(t, "db/big.txt", want)
+	var rangeCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"split-snap"`)
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+			return
+		}
+		var start, end int
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			t.Fatalf("missing/invalid range header: %q", r.Header.Get("Range"))
+		}
+		rangeCount++
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(archive)))
+		w.Header().Set("Content-Length", fmt.Sprint(end-start+1))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(archive[start : end+1])
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":      "true",
+		"DIR":                   dir,
+		"SCRATCH_DIR":           filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":          srv.URL,
+		"COMPRESSION":           "gzip",
+		"RANGE_SIZE":            "64",
+		"DOWNLOAD_CONCURRENCY":  "3",
+		"DOWNLOAD_WINDOW_BYTES": "1MiB",
+		"REQUIRE_MOUNTPOINT":    "false",
+	}
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if rangeCount < 2 {
+		t.Fatalf("rangeCount = %d, want multiple ranges", rangeCount)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "db/big.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("restored content mismatch")
 	}
 }
 
