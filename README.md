@@ -1,0 +1,87 @@
+# stream-download
+
+`stream-download` restores large RPC node snapshots in Kubernetes without storing the full compressed archive on disk.
+
+The tool is designed for initContainers. It resolves a snapshot source, downloads compressed bytes with bounded scratch usage, streams them through a decompressor, safely extracts tar entries into staging, and writes a completion stamp only after restore succeeds.
+
+## Basic HTTP Restore
+
+```bash
+RESTORE_SNAPSHOT=true \
+DIR=/data \
+SCRATCH_DIR=/scratch \
+SNAPSHOT_URL=https://example.com/snapshot.tar.zst \
+stream-download
+```
+
+`COMPRESSION=auto` is the default and detects `.tar.gz`, `.tgz`, `.tar.zst`, `.tar.zstd`, `.tar.lz4`, `.tar.xz`, `.txz`, and `.tar`.
+
+## Kubernetes Mounts
+
+Mount the RPC data PVC at `/data` and a scratch volume at `/scratch`.
+
+```yaml
+volumeMounts:
+  - name: rpc-data
+    mountPath: /data
+  - name: snapshot-scratch
+    mountPath: /scratch
+```
+
+For multi-hundred-GiB or multi-TiB snapshots, prefer a scratch PVC. If using `emptyDir`, set pod and initContainer `ephemeral-storage` requests and limits above `DOWNLOAD_WINDOW_BYTES`.
+
+## Important Environment Variables
+
+```bash
+RESTORE_SNAPSHOT=true
+DIR=/data
+SUBPATH=
+SCRATCH_DIR=/scratch
+
+SNAPSHOT_URL=https://example.com/snapshot.tar.zst
+SNAPSHOT_URLS=
+SOURCE_TYPE=auto
+
+S3_ENDPOINT_URL=
+S3_BUCKET=
+S3_KEY=
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_SESSION_TOKEN=
+AWS_WEB_IDENTITY_TOKEN_FILE=
+
+CHECKSUM_SHA256=
+CHECKSUM_URL=
+REQUIRE_CHECKSUM=false
+ALLOW_WEAK_IDENTITY=false
+
+DOWNLOAD_CONCURRENCY=8
+DOWNLOAD_WINDOW_BYTES=8GiB
+RANGE_SIZE=256MiB
+MAX_EXTRACTED_BYTES=
+MAX_EXTRACTED_FILES=
+
+COMPRESSION=auto
+LOG_FORMAT=json
+MAX_RETRIES=3
+STALL_TIMEOUT=10m
+WIPE_EXISTING=false
+REQUIRE_MOUNTPOINT=true
+PROGRESS_STATE_FILE=
+```
+
+## Safety
+
+The extractor rejects absolute paths, `..` traversal, symlinks, hardlinks, device nodes, FIFOs, sockets, and setuid/setgid bits. It does not preserve archive owner or group by default.
+
+By default, the target restore path must be empty. Set `WIPE_EXISTING=true` only when replacing an existing datadir is intentional.
+
+## Integrity
+
+`CHECKSUM_SHA256` verifies the compressed archive byte stream. For multipart snapshots, the checksum applies to the concatenated part stream in extraction order.
+
+Without a checksum, the tool pins source identity and logs that publisher authenticity is not proven. Set `REQUIRE_CHECKSUM=true` for strict production environments.
+
+## Logging
+
+JSON logging is the default for Kubernetes. Logs redact signed URL query parameters and authorization values. Failures include stable event names and an exit class suitable for initContainer triage.
