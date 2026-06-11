@@ -1,9 +1,11 @@
 package decompress
 
 import (
+	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
+	"os/exec"
 )
 
 type readCloser struct {
@@ -25,8 +27,50 @@ func NewReader(kind string, r io.Reader) (io.ReadCloser, error) {
 	case "gzip", "gz":
 		return gzip.NewReader(r)
 	default:
-		return nil, fmt.Errorf("compression %q is not supported by this reader", kind)
+		args, err := CommandFor(kind)
+		if err != nil {
+			return nil, err
+		}
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Stdin = r
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return nil, err
+		}
+		if err := cmd.Start(); err != nil {
+			return nil, err
+		}
+		return commandReadCloser{Reader: stdout, wait: cmd.Wait, kill: func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+		}, stderr: &stderr}, nil
 	}
+}
+
+type commandReadCloser struct {
+	io.Reader
+	wait   func() error
+	kill   func()
+	stderr *bytes.Buffer
+}
+
+func (c commandReadCloser) Close() error {
+	if c.kill != nil {
+		c.kill()
+	}
+	if c.wait == nil {
+		return nil
+	}
+	if err := c.wait(); err != nil {
+		if c.stderr != nil && c.stderr.Len() > 0 {
+			return fmt.Errorf("%w: %s", err, c.stderr.String())
+		}
+		return err
+	}
+	return nil
 }
 
 func CommandFor(kind string) ([]string, error) {
