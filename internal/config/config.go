@@ -28,6 +28,7 @@ type Config struct {
 	RangeSize           int64
 	MaxExtractedBytes   int64
 	MaxExtractedFiles   int64
+	StripComponents     int
 	Compression         string
 	LogFormat           string
 	MaxRetries          int
@@ -68,6 +69,7 @@ func LoadFromMap(env map[string]string) (Config, error) {
 	cfg.ProgressStateFile = strings.TrimSpace(env["PROGRESS_STATE_FILE"])
 	cfg.MaxExtractedBytes = defaultBytes(env, "MAX_EXTRACTED_BYTES", 0)
 	cfg.MaxExtractedFiles = defaultBytes(env, "MAX_EXTRACTED_FILES", 0)
+	cfg.StripComponents = intEnv(env, "STRIP_COMPONENTS", 0)
 
 	if err := validateAbs("DIR", cfg.Dir); err != nil {
 		return cfg, err
@@ -119,6 +121,9 @@ func LoadFromMap(env map[string]string) (Config, error) {
 	}
 	if cfg.MaxExtractedBytes < 0 || cfg.MaxExtractedFiles < 0 {
 		return cfg, errors.New("MAX_EXTRACTED_BYTES and MAX_EXTRACTED_FILES must not be negative")
+	}
+	if cfg.StripComponents < 0 {
+		return cfg, errors.New("STRIP_COMPONENTS must not be negative")
 	}
 	return cfg, nil
 }

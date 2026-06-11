@@ -73,6 +73,7 @@ DOWNLOAD_WINDOW_BYTES=8GiB
 RANGE_SIZE=256MiB
 MAX_EXTRACTED_BYTES=
 MAX_EXTRACTED_FILES=
+STRIP_COMPONENTS=0
 
 COMPRESSION=auto
 LOG_FORMAT=text
@@ -86,6 +87,8 @@ PROGRESS_STATE_FILE=
 ## Safety
 
 The extractor rejects absolute paths, `..` traversal, symlinks, hardlinks, device nodes, FIFOs, sockets, and setuid/setgid bits. It does not preserve archive owner or group by default.
+
+Set `STRIP_COMPONENTS` to remove leading archive path components during extraction, equivalent to `tar --strip-components=N`.
 
 By default, the target restore path must be empty. Set `WIPE_EXISTING=true` only when replacing an existing datadir is intentional.
 

@@ -27,6 +27,44 @@ func TestExtractSafeFile(t *testing.T) {
 	}
 }
 
+func TestExtractStripsPathComponents(t *testing.T) {
+	tmp := t.TempDir()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	_ = tw.WriteHeader(&tar.Header{Name: "a/b/c/chaindata/file.txt", Mode: 0644, Size: 5})
+	_, _ = tw.Write([]byte("hello"))
+	_ = tw.Close()
+	if err := ExtractTar(&buf, tmp, Limits{StripComponents: 3}); err != nil {
+		t.Fatalf("ExtractTar error: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(tmp, "chaindata/file.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("file = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "a")); !os.IsNotExist(err) {
+		t.Fatalf("unstripped parent exists or stat failed: %v", err)
+	}
+}
+
+func TestExtractStripSkipsTopLevelDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	_ = tw.WriteHeader(&tar.Header{Name: "a/b/c", Typeflag: tar.TypeDir})
+	_ = tw.WriteHeader(&tar.Header{Name: "a/b/c/file.txt", Mode: 0644, Size: 1})
+	_, _ = tw.Write([]byte("x"))
+	_ = tw.Close()
+	if err := ExtractTar(&buf, tmp, Limits{StripComponents: 3}); err != nil {
+		t.Fatalf("ExtractTar error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "file.txt")); err != nil {
+		t.Fatalf("stripped file missing: %v", err)
+	}
+}
+
 func TestRejectTraversal(t *testing.T) {
 	tmp := t.TempDir()
 	var buf bytes.Buffer

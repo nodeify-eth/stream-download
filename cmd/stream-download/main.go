@@ -111,7 +111,11 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := extract.ExtractTar(dr, staging, extract.Limits{MaxBytes: cfg.MaxExtractedBytes, MaxFiles: cfg.MaxExtractedFiles}); err != nil {
+	if err := extract.ExtractTar(dr, staging, extract.Limits{
+		MaxBytes:        cfg.MaxExtractedBytes,
+		MaxFiles:        cfg.MaxExtractedFiles,
+		StripComponents: cfg.StripComponents,
+	}); err != nil {
 		_ = dr.Close()
 		return err
 	}

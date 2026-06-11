@@ -62,6 +62,18 @@ func TestLoadDefaultsToTextLogs(t *testing.T) {
 	}
 }
 
+func TestLoadStripComponents(t *testing.T) {
+	env := validEnv()
+	env["STRIP_COMPONENTS"] = "3"
+	cfg, err := LoadFromMap(env)
+	if err != nil {
+		t.Fatalf("LoadFromMap returned error: %v", err)
+	}
+	if cfg.StripComponents != 3 {
+		t.Fatalf("StripComponents = %d, want 3", cfg.StripComponents)
+	}
+}
+
 func TestLoadRejectsAmbiguousHTTPAndS3Config(t *testing.T) {
 	env := validEnv()
 	env["S3_BUCKET"] = "snapshots"

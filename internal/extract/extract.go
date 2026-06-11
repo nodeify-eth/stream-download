@@ -10,8 +10,9 @@ import (
 )
 
 type Limits struct {
-	MaxBytes int64
-	MaxFiles int64
+	MaxBytes        int64
+	MaxFiles        int64
+	StripComponents int
 }
 
 func ExtractTar(r io.Reader, dest string, limits Limits) error {
@@ -30,7 +31,11 @@ func ExtractTar(r io.Reader, dest string, limits Limits) error {
 		if err != nil {
 			return err
 		}
-		target, err := safeTarget(root, h.Name)
+		name, ok := stripComponents(h.Name, limits.StripComponents)
+		if !ok {
+			continue
+		}
+		target, err := safeTarget(root, name)
 		if err != nil {
 			return err
 		}
@@ -72,6 +77,24 @@ func ExtractTar(r io.Reader, dest string, limits Limits) error {
 			return fmt.Errorf("unsupported tar entry type %d for %q", h.Typeflag, h.Name)
 		}
 	}
+}
+
+func stripComponents(name string, count int) (string, bool) {
+	if count <= 0 {
+		return name, true
+	}
+	clean := filepath.ToSlash(filepath.Clean(name))
+	parts := strings.Split(clean, "/")
+	out := parts[:0]
+	for _, part := range parts {
+		if part != "." && part != "" {
+			out = append(out, part)
+		}
+	}
+	if len(out) <= count {
+		return "", false
+	}
+	return strings.Join(out[count:], "/"), true
 }
 
 func safeTarget(root, name string) (string, error) {
