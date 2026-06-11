@@ -16,6 +16,20 @@ stream-download
 
 `COMPRESSION=auto` is the default and detects `.tar.gz`, `.tgz`, `.tar.zst`, `.tar.zstd`, `.tar.lz4`, `.tar.xz`, `.txz`, and `.tar`.
 
+## S3-Compatible Restore
+
+```bash
+RESTORE_SNAPSHOT=true \
+DIR=/data \
+SCRATCH_DIR=/scratch \
+S3_ENDPOINT_URL=https://s3.example.com \
+S3_BUCKET=snapshots \
+S3_KEY=base/snapshot.tar.zst \
+stream-download
+```
+
+Credentials are loaded through the standard AWS SDK environment and web identity chain.
+
 ## Kubernetes Mounts
 
 Mount the RPC data PVC at `/data` and a scratch volume at `/scratch`.
@@ -51,7 +65,6 @@ AWS_SESSION_TOKEN=
 AWS_WEB_IDENTITY_TOKEN_FILE=
 
 CHECKSUM_SHA256=
-CHECKSUM_URL=
 REQUIRE_CHECKSUM=false
 ALLOW_WEAK_IDENTITY=false
 
@@ -76,11 +89,13 @@ The extractor rejects absolute paths, `..` traversal, symlinks, hardlinks, devic
 
 By default, the target restore path must be empty. Set `WIPE_EXISTING=true` only when replacing an existing datadir is intentional.
 
+The published container runs as UID/GID `1000:1000`. In Kubernetes, set volume ownership with `fsGroup: 1000` or an equivalent initContainer.
+
 ## Integrity
 
 `CHECKSUM_SHA256` verifies the compressed archive byte stream. For multipart snapshots, the checksum applies to the concatenated part stream in extraction order.
 
-Without a checksum, the tool pins source identity and logs that publisher authenticity is not proven. Set `REQUIRE_CHECKSUM=true` for strict production environments.
+Set `REQUIRE_CHECKSUM=true` for strict production environments. When enabled, startup fails before any network request unless `CHECKSUM_SHA256` is set.
 
 ## Logging
 

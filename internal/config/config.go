@@ -21,7 +21,6 @@ type Config struct {
 	S3Bucket            string
 	S3Key               string
 	ChecksumSHA256      string
-	ChecksumURL         string
 	RequireChecksum     bool
 	AllowWeakIdentity   bool
 	DownloadConcurrency int
@@ -63,7 +62,6 @@ func LoadFromMap(env map[string]string) (Config, error) {
 	cfg.S3Bucket = strings.TrimSpace(env["S3_BUCKET"])
 	cfg.S3Key = strings.TrimSpace(env["S3_KEY"])
 	cfg.ChecksumSHA256 = strings.ToLower(strings.TrimSpace(env["CHECKSUM_SHA256"]))
-	cfg.ChecksumURL = strings.TrimSpace(env["CHECKSUM_URL"])
 	cfg.RequireChecksum = boolEnv(env, "REQUIRE_CHECKSUM", false)
 	cfg.AllowWeakIdentity = boolEnv(env, "ALLOW_WEAK_IDENTITY", false)
 	cfg.WipeExisting = boolEnv(env, "WIPE_EXISTING", false)
@@ -106,6 +104,12 @@ func LoadFromMap(env map[string]string) (Config, error) {
 	}
 	if !hasHTTP && !hasS3 {
 		return cfg, errors.New("set SNAPSHOT_URL, SNAPSHOT_URLS, or S3_BUCKET/S3_KEY")
+	}
+	if cfg.RequireChecksum && cfg.ChecksumSHA256 == "" {
+		return cfg, errors.New("CHECKSUM_SHA256 is required when REQUIRE_CHECKSUM=true")
+	}
+	if cfg.ChecksumSHA256 != "" && !isSHA256Hex(cfg.ChecksumSHA256) {
+		return cfg, errors.New("CHECKSUM_SHA256 must be a 64-character hex SHA-256 digest")
 	}
 	if cfg.DownloadConcurrency <= 0 || cfg.MaxRetries <= 0 {
 		return cfg, errors.New("DOWNLOAD_CONCURRENCY and MAX_RETRIES must be positive")
@@ -153,6 +157,18 @@ func validateAbs(name, value string) error {
 		return fmt.Errorf("%s must be absolute", name)
 	}
 	return nil
+}
+
+func isSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func stringEnv(env map[string]string, key, fallback string) string {

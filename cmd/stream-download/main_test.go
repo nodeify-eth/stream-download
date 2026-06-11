@@ -4,13 +4,19 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nodeify-eth/stream-download/internal/source"
 )
 
 func TestRunRestoresSmallGzipTar(t *testing.T) {
@@ -124,6 +130,174 @@ func TestRunUsesHTTPRangesWhenContentLengthKnown(t *testing.T) {
 	}
 }
 
+func TestRunFallsBackToSingleGETWithoutStrongHTTPIdentity(t *testing.T) {
+	archive := gzipTar(t, "db/file.txt", "single-get")
+	var sawRange bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+			return
+		}
+		if r.Header.Get("Range") != "" {
+			sawRange = true
+		}
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL,
+		"COMPRESSION":        "gzip",
+		"RANGE_SIZE":         "64",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if sawRange {
+		t.Fatalf("server observed ranged GET without strong identity")
+	}
+}
+
+func TestRunRejectsMissingRequiredChecksum(t *testing.T) {
+	archive := gzipTar(t, "db/file.txt", "checksum-required")
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+			return
+		}
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL,
+		"COMPRESSION":        "gzip",
+		"REQUIRE_CHECKSUM":   "true",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, os.Stdout, os.Stderr); err == nil {
+		t.Fatalf("run succeeded without required checksum")
+	}
+	if requests != 0 {
+		t.Fatalf("server saw %d requests before checksum validation, want 0", requests)
+	}
+}
+
+func TestRunRejectsMismatchedChecksumBeforePublishingFiles(t *testing.T) {
+	archive := gzipTar(t, "db/file.txt", "bad-checksum")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"checksum-snap"`)
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(archive)-1, len(archive)))
+		w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL,
+		"COMPRESSION":        "gzip",
+		"CHECKSUM_SHA256":    strings.Repeat("0", 64),
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, os.Stdout, os.Stderr); err == nil {
+		t.Fatalf("run succeeded with mismatched checksum")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "db/file.txt")); !os.IsNotExist(err) {
+		t.Fatalf("restored file was published despite checksum mismatch: %v", err)
+	}
+}
+
+func TestRunAcceptsMatchingChecksum(t *testing.T) {
+	archive := gzipTar(t, "db/file.txt", "good-checksum")
+	sum := sha256.Sum256(archive)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"checksum-snap"`)
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(archive)-1, len(archive)))
+		w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL,
+		"COMPRESSION":        "gzip",
+		"CHECKSUM_SHA256":    hex.EncodeToString(sum[:]),
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "db/file.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if string(got) != "good-checksum" {
+		t.Fatalf("restored file = %q", got)
+	}
+}
+
+func TestRunRestoresFromS3Source(t *testing.T) {
+	archive := gzipTar(t, "s3/file.txt", "from-s3")
+	original := newS3Source
+	t.Cleanup(func() { newS3Source = original })
+	newS3Source = func(ctx context.Context, bucket, key, endpoint string) (source.Reader, error) {
+		if bucket != "snapshots" || key != "snapshot.tar.gz" || endpoint != "https://s3.example" {
+			t.Fatalf("S3 source args = %q %q %q", bucket, key, endpoint)
+		}
+		return fakeSource{data: archive}, nil
+	}
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"S3_ENDPOINT_URL":    "https://s3.example",
+		"S3_BUCKET":          "snapshots",
+		"S3_KEY":             "snapshot.tar.gz",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "s3/file.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if string(got) != "from-s3" {
+		t.Fatalf("restored file = %q", got)
+	}
+}
+
 func TestRunSkipsWhenCompletionStampMatches(t *testing.T) {
 	archive := gzipTar(t, "db/file.txt", "skip")
 	var getCount int
@@ -159,6 +333,18 @@ func TestRunSkipsWhenCompletionStampMatches(t *testing.T) {
 	if getCount != 1 {
 		t.Fatalf("GET count = %d, want 1", getCount)
 	}
+}
+
+type fakeSource struct {
+	data []byte
+}
+
+func (f fakeSource) Resolve(context.Context) (source.Identity, error) {
+	return source.Identity{Kind: "fake", URL: "fake://snapshot", Size: int64(len(f.data)), ETag: `"fake"`}, nil
+}
+
+func (f fakeSource) ReadRange(_ context.Context, r source.Range, _ source.Identity) (io.ReadCloser, source.Identity, error) {
+	return io.NopCloser(bytes.NewReader(f.data[r.Start : r.End+1])), source.Identity{}, nil
 }
 
 func TestRunSplitsKnownObjectIntoMultipleRanges(t *testing.T) {

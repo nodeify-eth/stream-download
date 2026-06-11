@@ -51,7 +51,13 @@ func (s *S3) Resolve(ctx context.Context) (Identity, error) {
 
 func (s *S3) ReadRange(ctx context.Context, r Range, pinned Identity) (io.ReadCloser, Identity, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", r.Start, r.End)
-	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(s.key), Range: aws.String(rangeHeader)})
+	in := &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(s.key), Range: aws.String(rangeHeader)}
+	if pinned.VersionID != "" {
+		in.VersionId = aws.String(pinned.VersionID)
+	} else if pinned.ETag != "" {
+		in.IfMatch = aws.String(pinned.ETag)
+	}
+	out, err := s.client.GetObject(ctx, in)
 	if err != nil {
 		return nil, Identity{}, err
 	}

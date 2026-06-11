@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"os"
@@ -42,14 +45,12 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		logger.Info("restore_skipped", nil)
 		return nil
 	}
-	if len(cfg.SnapshotURLs) == 0 {
-		return fmt.Errorf("no snapshot URL configured")
-	}
 	target := filepath.Join(cfg.Dir, cfg.Subpath)
-	compression := compressionFor(cfg.Compression, cfg.SnapshotURLs[0])
+	sourceName := snapshotSourceName(cfg)
+	compression := compressionFor(cfg.Compression, sourceName)
 	stampPath := filepath.Join(cfg.Dir, ".stream-download.stamp")
 	stamp := restore.Stamp{
-		Source:      cfg.SnapshotURLs[0],
+		Source:      sourceName,
 		Checksum:    cfg.ChecksumSHA256,
 		Target:      target,
 		Compression: compression,
@@ -75,13 +76,28 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 	}
 	defer cleanup()
 
+	var checksum hash.Hash
+	if cfg.ChecksumSHA256 != "" {
+		checksum = sha256.New()
+		stream = io.TeeReader(stream, checksum)
+	}
 	dr, err := decompress.NewReader(compression, stream)
 	if err != nil {
 		return err
 	}
-	defer dr.Close()
 	if err := extract.ExtractTar(dr, staging, extract.Limits{MaxBytes: cfg.MaxExtractedBytes, MaxFiles: cfg.MaxExtractedFiles}); err != nil {
+		_ = dr.Close()
 		return err
+	}
+	if err := dr.Close(); err != nil {
+		return err
+	}
+	if checksum != nil {
+		got := hex.EncodeToString(checksum.Sum(nil))
+		if got != cfg.ChecksumSHA256 {
+			_ = os.RemoveAll(staging)
+			return fmt.Errorf("checksum mismatch: sha256 %s, want %s", got, cfg.ChecksumSHA256)
+		}
 	}
 	if err := moveChildren(staging, target); err != nil {
 		return err
@@ -92,6 +108,13 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 	}
 	logger.Info("restore_complete", logx.Fields{"target": target})
 	return nil
+}
+
+func snapshotSourceName(cfg config.Config) string {
+	if len(cfg.SnapshotURLs) > 0 {
+		return cfg.SnapshotURLs[0]
+	}
+	return fmt.Sprintf("s3://%s/%s", cfg.S3Bucket, cfg.S3Key)
 }
 
 func compressionFor(configured, snapshotURL string) string {
@@ -115,15 +138,28 @@ func compressionFor(configured, snapshotURL string) string {
 	}
 }
 
+var newS3Source = func(ctx context.Context, bucket, key, endpoint string) (source.Reader, error) {
+	return source.NewDefaultS3(ctx, bucket, key, endpoint)
+}
+
 func openSnapshotStream(ctx context.Context, cfg config.Config) (io.Reader, func(), error) {
-	src := source.NewHTTP(cfg.SnapshotURLs[0], http.DefaultClient)
+	src, err := sourceFromConfig(ctx, cfg)
+	if err != nil {
+		return nil, func() {}, err
+	}
 	id, err := src.Resolve(ctx)
-	if err == nil && id.Size > 0 {
+	if err == nil && id.Size > 0 && canUseRangeIdentity(id, cfg.AllowWeakIdentity) {
 		rc, err := spool.StreamRanges(ctx, src, id, cfg.RangeSize, cfg.DownloadConcurrency, cfg.ScratchDir)
 		if err != nil {
 			return nil, func() {}, err
 		}
 		return rc, func() { _ = rc.Close() }, nil
+	}
+	if cfg.S3Bucket != "" {
+		if err != nil {
+			return nil, func() {}, err
+		}
+		return nil, func() {}, fmt.Errorf("S3 source size must be known")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.SnapshotURLs[0], nil)
 	if err != nil {
@@ -138,6 +174,26 @@ func openSnapshotStream(ctx context.Context, cfg config.Config) (io.Reader, func
 		return nil, func() {}, fmt.Errorf("GET returned HTTP %d", res.StatusCode)
 	}
 	return res.Body, func() { _ = res.Body.Close() }, nil
+}
+
+func canUseRangeIdentity(id source.Identity, allowWeak bool) bool {
+	if id.Kind == "s3" {
+		return id.VersionID != "" || id.ETag != "" || allowWeak
+	}
+	if id.ETag == "" {
+		return allowWeak
+	}
+	return !id.Weak || allowWeak
+}
+
+func sourceFromConfig(ctx context.Context, cfg config.Config) (source.Reader, error) {
+	if cfg.S3Bucket != "" {
+		return newS3Source(ctx, cfg.S3Bucket, cfg.S3Key, cfg.S3EndpointURL)
+	}
+	if len(cfg.SnapshotURLs) == 0 {
+		return nil, fmt.Errorf("no snapshot URL configured")
+	}
+	return source.NewHTTP(cfg.SnapshotURLs[0], http.DefaultClient), nil
 }
 
 func moveChildren(src, dst string) error {

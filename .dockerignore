@@ -1,0 +1,9 @@
+.git
+.github
+.DS_Store
+docs/superpowers
+*.log
+*.tmp
+.stream-download-staging
+range-*.tmp
+range-[0-9]*
