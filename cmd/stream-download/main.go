@@ -74,7 +74,7 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer cleanup()
-	logger.Info("start_restore", logx.Fields{
+	startFields := logx.Fields{
 		"source_kind":          meta.sourceKind,
 		"source_size_bytes":    meta.sourceSize,
 		"range_mode":           meta.rangeMode,
@@ -82,7 +82,24 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		"download_concurrency": cfg.DownloadConcurrency,
 		"compression":          compression,
 		"target":               target,
-	})
+	}
+	if meta.sourceSize > 0 {
+		if meta.rangeMode {
+			startFields["message"] = fmt.Sprintf(
+				"restoring %s %s snapshot to %s using %d concurrent %s ranges",
+				formatBytes(float64(meta.sourceSize)),
+				compression,
+				target,
+				cfg.DownloadConcurrency,
+				formatBytes(float64(cfg.RangeSize)),
+			)
+		} else {
+			startFields["message"] = fmt.Sprintf("restoring %s %s snapshot to %s using single stream", formatBytes(float64(meta.sourceSize)), compression, target)
+		}
+	} else {
+		startFields["message"] = fmt.Sprintf("restoring %s snapshot to %s", compression, target)
+	}
+	logger.Info("start_restore", startFields)
 	stream = newProgressReader(stream, logger, meta)
 
 	var checksum hash.Hash
@@ -243,11 +260,11 @@ func newProgressReader(r io.Reader, logger *logx.Logger, meta streamMetadata) io
 }
 
 func (p *progressReader) Read(b []byte) (int, error) {
-	now := time.Now()
 	if p.started.IsZero() {
-		p.started = now
+		p.started = time.Now()
 	}
 	n, err := p.r.Read(b)
+	now := time.Now()
 	if n > 0 {
 		p.read += int64(n)
 		p.log(now, false)
@@ -265,31 +282,104 @@ func (p *progressReader) log(now time.Time, complete bool) {
 	}
 	p.lastLog = now
 	elapsed := now.Sub(p.started).Seconds()
-	if elapsed <= 0 {
-		elapsed = 0.001
-	}
-	bytesPerSecond := float64(p.read) / elapsed
 	fields := logx.Fields{
 		"compressed_bytes_read": p.read,
 		"source_size_bytes":     p.meta.sourceSize,
 		"source_kind":           p.meta.sourceKind,
 		"range_mode":            p.meta.rangeMode,
 		"elapsed_seconds":       int64(elapsed),
-		"bytes_per_second":      bytesPerSecond,
+	}
+	if elapsed >= 5 && p.read >= 1024*1024 {
+		bytesPerSecond := float64(p.read) / elapsed
+		fields["bytes_per_second"] = bytesPerSecond
+		if p.meta.sourceSize > 0 {
+			remaining := p.meta.sourceSize - p.read
+			if remaining < 0 {
+				remaining = 0
+			}
+			if bytesPerSecond > 0 {
+				fields["eta_seconds"] = int64(float64(remaining) / bytesPerSecond)
+			}
+		}
 	}
 	if p.meta.sourceSize > 0 {
 		fields["percent_complete"] = float64(p.read) * 100 / float64(p.meta.sourceSize)
-		remaining := p.meta.sourceSize - p.read
-		if remaining < 0 {
-			remaining = 0
-		}
-		if bytesPerSecond > 0 {
-			fields["eta_seconds"] = int64(float64(remaining) / bytesPerSecond)
-		}
 	}
+	fields["message"] = p.message(fields, complete)
 	if complete {
 		p.logger.Info("restore_stream_complete", fields)
 		return
 	}
 	p.logger.Info("restore_progress", fields)
+}
+
+func (p *progressReader) message(fields logx.Fields, complete bool) string {
+	percent, hasPercent := fields["percent_complete"].(float64)
+	elapsed, _ := fields["elapsed_seconds"].(int64)
+	rate, hasRate := fields["bytes_per_second"].(float64)
+	eta, hasETA := fields["eta_seconds"].(int64)
+
+	prefix := "downloaded"
+	if complete {
+		prefix = "download complete"
+	}
+	parts := []string{}
+	if hasPercent {
+		parts = append(parts, fmt.Sprintf("%s %s", formatPercent(percent), prefix))
+	} else {
+		parts = append(parts, prefix)
+	}
+	if hasRate {
+		parts = append(parts, fmt.Sprintf("%s/s", formatBytes(rate)))
+	}
+	if hasETA && !complete {
+		parts = append(parts, fmt.Sprintf("ETA %s", formatDuration(eta)))
+	}
+	parts = append(parts, fmt.Sprintf("elapsed %s", formatDuration(elapsed)))
+	if p.meta.sourceSize > 0 {
+		parts = append(parts, fmt.Sprintf("(%s / %s)", formatBytes(float64(p.read)), formatBytes(float64(p.meta.sourceSize))))
+	} else {
+		parts = append(parts, fmt.Sprintf("(%s)", formatBytes(float64(p.read))))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatPercent(v float64) string {
+	switch {
+	case v >= 10:
+		return fmt.Sprintf("%.1f%%", v)
+	case v >= 1:
+		return fmt.Sprintf("%.2f%%", v)
+	default:
+		return fmt.Sprintf("%.3f%%", v)
+	}
+}
+
+func formatBytes(v float64) string {
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	i := 0
+	for v >= 1024 && i < len(units)-1 {
+		v /= 1024
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%.0f %s", v, units[i])
+	}
+	return fmt.Sprintf("%.2f %s", v, units[i])
+}
+
+func formatDuration(seconds int64) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	s := seconds % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %02dm %02ds", h, m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %02ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
 }

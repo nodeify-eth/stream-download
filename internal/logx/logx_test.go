@@ -33,3 +33,16 @@ func TestJSONLoggerRedactsFields(t *testing.T) {
 		t.Fatalf("log leaked secret: %s", out)
 	}
 }
+
+func TestTextLoggerUsesMessageField(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(&buf, "text")
+	l.Info("restore_progress", Fields{"message": "20.0% downloaded, 1.00 MiB/s, ETA 8s"})
+	out := buf.String()
+	if !strings.Contains(out, "INFO restore_progress 20.0% downloaded, 1.00 MiB/s, ETA 8s") {
+		t.Fatalf("text log did not use message field: %s", out)
+	}
+	if strings.Contains(out, "map[") {
+		t.Fatalf("text log included raw map: %s", out)
+	}
+}

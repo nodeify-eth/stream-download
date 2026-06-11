@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/nodeify-eth/stream-download/internal/logx"
 	"github.com/nodeify-eth/stream-download/internal/source"
 )
 
@@ -165,11 +167,42 @@ func TestRunLogsRestoreProgress(t *testing.T) {
 	if !strings.Contains(out, `"compressed_bytes_read"`) {
 		t.Fatalf("compressed byte count missing from output: %s", out)
 	}
+}
+
+func TestProgressReaderReportsRateAndETAAfterWarmup(t *testing.T) {
+	var stdout bytes.Buffer
+	logger := logx.New(&stdout, "json")
+	p := &progressReader{
+		logger:  logger,
+		meta:    streamMetadata{sourceKind: "http", sourceSize: 10 * 1024 * 1024, rangeMode: true},
+		started: time.Unix(0, 0),
+		read:    2 * 1024 * 1024,
+	}
+	p.log(time.Unix(10, 0), false)
+	out := stdout.String()
 	if !strings.Contains(out, `"bytes_per_second"`) {
 		t.Fatalf("transfer rate missing from output: %s", out)
 	}
 	if !strings.Contains(out, `"eta_seconds"`) {
 		t.Fatalf("ETA missing from output: %s", out)
+	}
+}
+
+func TestProgressReaderHumanMessage(t *testing.T) {
+	p := &progressReader{
+		meta: streamMetadata{sourceKind: "http", sourceSize: 10 * 1024 * 1024, rangeMode: true},
+		read: 2 * 1024 * 1024,
+	}
+	msg := p.message(logx.Fields{
+		"percent_complete": 20.0,
+		"bytes_per_second": float64(1024 * 1024),
+		"eta_seconds":      int64(8),
+		"elapsed_seconds":  int64(2),
+	}, false)
+	for _, want := range []string{"20.0% downloaded", "1.00 MiB/s", "ETA 8s", "elapsed 2s", "2.00 MiB / 10.00 MiB"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("message %q missing %q", msg, want)
+		}
 	}
 }
 

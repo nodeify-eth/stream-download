@@ -41,7 +41,12 @@ func (l *Logger) write(level, event string, fields Fields) {
 		fields = Fields{}
 	}
 	if l.format == "text" {
-		fmt.Fprintf(l.out, "%s %s %s %v\n", time.Now().UTC().Format(time.RFC3339), level, event, redactFields(fields))
+		fields = redactFields(fields)
+		if message, ok := fields["message"].(string); ok && message != "" {
+			fmt.Fprintf(l.out, "%s %s %s %s\n", time.Now().UTC().Format(time.RFC3339), strings.ToUpper(level), event, message)
+			return
+		}
+		fmt.Fprintf(l.out, "%s %s %s %v\n", time.Now().UTC().Format(time.RFC3339), strings.ToUpper(level), event, fields)
 		return
 	}
 	rec := Fields{
@@ -68,13 +73,13 @@ func redactFields(in Fields) Fields {
 }
 
 var secretQuery = map[string]bool{
-	"x-amz-signature":     true,
-	"x-amz-credential":    true,
+	"x-amz-signature":      true,
+	"x-amz-credential":     true,
 	"x-amz-security-token": true,
-	"awsaccesskeyid":      true,
-	"signature":           true,
-	"token":               true,
-	"access_token":        true,
+	"awsaccesskeyid":       true,
+	"signature":            true,
+	"token":                true,
+	"access_token":         true,
 }
 
 var authHeaderRE = regexp.MustCompile(`(?i)(authorization:\s*)\S+(\s+\S+)?`)
