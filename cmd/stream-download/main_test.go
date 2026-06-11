@@ -124,6 +124,43 @@ func TestRunUsesHTTPRangesWhenContentLengthKnown(t *testing.T) {
 	}
 }
 
+func TestRunSkipsWhenCompletionStampMatches(t *testing.T) {
+	archive := gzipTar(t, "db/file.txt", "skip")
+	var getCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"skip-snap"`)
+		w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+		if r.Method == http.MethodHead {
+			return
+		}
+		getCount++
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(archive)-1, len(archive)))
+		w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL,
+		"COMPRESSION":        "gzip",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("first run error: %v", err)
+	}
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("second run error: %v", err)
+	}
+	if getCount != 1 {
+		t.Fatalf("GET count = %d, want 1", getCount)
+	}
+}
+
 func TestRunSplitsKnownObjectIntoMultipleRanges(t *testing.T) {
 	want := strings.Repeat("range-data-", 200)
 	archive := gzipTar(t, "db/big.txt", want)

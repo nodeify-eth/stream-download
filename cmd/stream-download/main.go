@@ -46,6 +46,19 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("no snapshot URL configured")
 	}
 	target := filepath.Join(cfg.Dir, cfg.Subpath)
+	compression := compressionFor(cfg.Compression, cfg.SnapshotURLs[0])
+	stampPath := filepath.Join(cfg.Dir, ".stream-download.stamp")
+	stamp := restore.Stamp{
+		Source:      cfg.SnapshotURLs[0],
+		Checksum:    cfg.ChecksumSHA256,
+		Target:      target,
+		Compression: compression,
+		ToolVersion: "dev",
+	}
+	if restore.StampMatches(stampPath, stamp) {
+		logger.Info("restore_already_complete", logx.Fields{"target": target})
+		return nil
+	}
 	if err := restore.PrepareTarget(target, cfg.WipeExisting); err != nil {
 		return err
 	}
@@ -62,7 +75,6 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 	}
 	defer cleanup()
 
-	compression := compressionFor(cfg.Compression, cfg.SnapshotURLs[0])
 	dr, err := decompress.NewReader(compression, stream)
 	if err != nil {
 		return err
@@ -75,8 +87,7 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		return err
 	}
 	_ = os.RemoveAll(staging)
-	stamp := restore.Stamp{Source: cfg.SnapshotURLs[0], Target: target, Compression: compression, ToolVersion: "dev"}
-	if err := restore.WriteStamp(filepath.Join(cfg.Dir, ".stream-download.stamp"), stamp); err != nil {
+	if err := restore.WriteStamp(stampPath, stamp); err != nil {
 		return err
 	}
 	logger.Info("restore_complete", logx.Fields{"target": target})
