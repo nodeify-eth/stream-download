@@ -75,7 +75,7 @@ MAX_EXTRACTED_BYTES=
 MAX_EXTRACTED_FILES=
 
 COMPRESSION=auto
-LOG_FORMAT=json
+LOG_FORMAT=text
 MAX_RETRIES=3
 STALL_TIMEOUT=10m
 WIPE_EXISTING=false
@@ -99,4 +99,4 @@ Set `REQUIRE_CHECKSUM=true` for strict production environments. When enabled, st
 
 ## Logging
 
-JSON logging is the default for Kubernetes. Logs redact signed URL query parameters and authorization values. Failures include stable event names and an exit class suitable for initContainer triage.
+Text logging is the default so `kubectl logs -f` shows readable progress, speed, elapsed time, and ETA during long restores. Set `LOG_FORMAT=json` when shipping logs to structured collectors. Logs redact signed URL query parameters and authorization values.

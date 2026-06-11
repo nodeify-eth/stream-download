@@ -115,6 +115,7 @@ func TestRunUsesHTTPRangesWhenContentLengthKnown(t *testing.T) {
 		"SNAPSHOT_URL":       srv.URL,
 		"COMPRESSION":        "gzip",
 		"RANGE_SIZE":         "1MiB",
+		"LOG_FORMAT":         "json",
 		"REQUIRE_MOUNTPOINT": "false",
 	}
 	if err := run(env, os.Stdout, os.Stderr); err != nil {
@@ -155,6 +156,7 @@ func TestRunLogsRestoreProgress(t *testing.T) {
 		"SNAPSHOT_URL":       srv.URL,
 		"COMPRESSION":        "gzip",
 		"RANGE_SIZE":         "1MiB",
+		"LOG_FORMAT":         "json",
 		"REQUIRE_MOUNTPOINT": "false",
 	}
 	if err := run(env, &stdout, os.Stderr); err != nil {

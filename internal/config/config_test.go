@@ -52,6 +52,16 @@ func TestSnapshotURLsTakePrecedence(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsToTextLogs(t *testing.T) {
+	cfg, err := LoadFromMap(validEnv())
+	if err != nil {
+		t.Fatalf("LoadFromMap returned error: %v", err)
+	}
+	if cfg.LogFormat != "text" {
+		t.Fatalf("LogFormat = %q, want text", cfg.LogFormat)
+	}
+}
+
 func TestLoadRejectsAmbiguousHTTPAndS3Config(t *testing.T) {
 	env := validEnv()
 	env["S3_BUCKET"] = "snapshots"

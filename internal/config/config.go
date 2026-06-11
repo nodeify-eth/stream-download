@@ -45,7 +45,7 @@ func LoadFromMap(env map[string]string) (Config, error) {
 		DownloadWindowBytes: defaultBytes(env, "DOWNLOAD_WINDOW_BYTES", 8*1024*1024*1024),
 		RangeSize:           defaultBytes(env, "RANGE_SIZE", 256*1024*1024),
 		Compression:         stringEnv(env, "COMPRESSION", "auto"),
-		LogFormat:           stringEnv(env, "LOG_FORMAT", "json"),
+		LogFormat:           stringEnv(env, "LOG_FORMAT", "text"),
 		MaxRetries:          intEnv(env, "MAX_RETRIES", 3),
 		StallTimeout:        durationEnv(env, "STALL_TIMEOUT", 10*time.Minute),
 		RequireMountpoint:   boolEnv(env, "REQUIRE_MOUNTPOINT", true),
