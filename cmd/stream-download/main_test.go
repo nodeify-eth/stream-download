@@ -47,6 +47,37 @@ func TestRunRestoresSmallGzipTar(t *testing.T) {
 	}
 }
 
+func TestRunAutoDetectsGzipFromURL(t *testing.T) {
+	archive := gzipTar(t, "auto/file.txt", "gzip-auto")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL + "/snapshot.tar.gz",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "auto/file.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if string(got) != "gzip-auto" {
+		t.Fatalf("restored file = %q", got)
+	}
+}
+
 func TestRunUsesHTTPRangesWhenContentLengthKnown(t *testing.T) {
 	archive := gzipTar(t, "db/file.txt", "range")
 	var sawRange bool

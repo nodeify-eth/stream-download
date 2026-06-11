@@ -62,7 +62,8 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 	}
 	defer cleanup()
 
-	dr, err := decompress.NewReader(cfg.Compression, stream)
+	compression := compressionFor(cfg.Compression, cfg.SnapshotURLs[0])
+	dr, err := decompress.NewReader(compression, stream)
 	if err != nil {
 		return err
 	}
@@ -74,12 +75,33 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		return err
 	}
 	_ = os.RemoveAll(staging)
-	stamp := restore.Stamp{Source: cfg.SnapshotURLs[0], Target: target, Compression: cfg.Compression, ToolVersion: "dev"}
+	stamp := restore.Stamp{Source: cfg.SnapshotURLs[0], Target: target, Compression: compression, ToolVersion: "dev"}
 	if err := restore.WriteStamp(filepath.Join(cfg.Dir, ".stream-download.stamp"), stamp); err != nil {
 		return err
 	}
 	logger.Info("restore_complete", logx.Fields{"target": target})
 	return nil
+}
+
+func compressionFor(configured, snapshotURL string) string {
+	if configured != "" && configured != "auto" {
+		return configured
+	}
+	clean := strings.ToLower(strings.Split(snapshotURL, "?")[0])
+	switch {
+	case strings.HasSuffix(clean, ".tar.gz"), strings.HasSuffix(clean, ".tgz"):
+		return "gzip"
+	case strings.HasSuffix(clean, ".tar.zst"), strings.HasSuffix(clean, ".tar.zstd"):
+		return "zstd"
+	case strings.HasSuffix(clean, ".tar.lz4"):
+		return "lz4"
+	case strings.HasSuffix(clean, ".tar.xz"), strings.HasSuffix(clean, ".txz"):
+		return "xz"
+	case strings.HasSuffix(clean, ".tar"):
+		return "none"
+	default:
+		return configured
+	}
 }
 
 func openSnapshotStream(ctx context.Context, cfg config.Config) (io.Reader, func(), error) {
