@@ -16,7 +16,7 @@ type rangeResult struct {
 	err   error
 }
 
-func StreamRanges(ctx context.Context, src source.Reader, id source.Identity, rangeSize int64, concurrency int, scratchDir string, maxRetries int) (io.ReadCloser, error) {
+func StreamRanges(ctx context.Context, src source.Reader, id source.Identity, rangeSize int64, concurrency int, scratchDir string, maxRetries int, windowBytes int64) (io.ReadCloser, error) {
 	if id.Size <= 0 {
 		return nil, fmt.Errorf("source size must be known for range streaming")
 	}
@@ -28,6 +28,16 @@ func StreamRanges(ctx context.Context, src source.Reader, id source.Identity, ra
 	}
 	if maxRetries <= 0 {
 		return nil, fmt.Errorf("max retries must be positive")
+	}
+	if windowBytes <= 0 {
+		return nil, fmt.Errorf("window bytes must be positive")
+	}
+	maxWindowRanges := int(windowBytes / rangeSize)
+	if maxWindowRanges < 1 {
+		maxWindowRanges = 1
+	}
+	if concurrency > maxWindowRanges {
+		concurrency = maxWindowRanges
 	}
 	if err := os.MkdirAll(scratchDir, 0700); err != nil {
 		return nil, err

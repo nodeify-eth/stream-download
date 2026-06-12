@@ -56,6 +56,20 @@ func TestRunRestoresSmallGzipTar(t *testing.T) {
 	}
 }
 
+func TestRunRejectsMissingMountpointByDefault(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT": "true",
+		"DIR":              dir,
+		"SCRATCH_DIR":      filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":     "https://example.invalid/snapshot.tar.gz",
+		"COMPRESSION":      "gzip",
+	}
+	if err := run(env, io.Discard, io.Discard); err == nil {
+		t.Fatalf("run succeeded without mountpoint")
+	}
+}
+
 func TestRunAutoDetectsGzipFromURL(t *testing.T) {
 	archive := gzipTar(t, "auto/file.txt", "gzip-auto")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -411,6 +425,41 @@ func TestRunAcceptsMatchingChecksum(t *testing.T) {
 	}
 	if string(got) != "good-checksum" {
 		t.Fatalf("restored file = %q", got)
+	}
+}
+
+func TestRunWritesResolvedIdentityToStamp(t *testing.T) {
+	archive := gzipTar(t, "db/file.txt", "identity")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"identity-snap"`)
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprint(len(archive)))
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(archive)-1, len(archive)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL,
+		"COMPRESSION":        "gzip",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, io.Discard, io.Discard); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, restore.StampFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `etag:\"identity-snap\"`) {
+		t.Fatalf("stamp missing identity: %s", data)
 	}
 }
 

@@ -42,7 +42,7 @@ func NewReader(kind string, r io.Reader) (io.ReadCloser, error) {
 		if err := cmd.Start(); err != nil {
 			return nil, err
 		}
-		return commandReadCloser{Reader: stdout, wait: cmd.Wait, kill: func() {
+		return &commandReadCloser{reader: stdout, wait: cmd.Wait, kill: func() {
 			if cmd.Process != nil {
 				_ = cmd.Process.Kill()
 			}
@@ -51,14 +51,23 @@ func NewReader(kind string, r io.Reader) (io.ReadCloser, error) {
 }
 
 type commandReadCloser struct {
-	io.Reader
+	reader io.Reader
 	wait   func() error
 	kill   func()
 	stderr *bytes.Buffer
+	eof    bool
 }
 
-func (c commandReadCloser) Close() error {
-	if c.kill != nil {
+func (c *commandReadCloser) Read(p []byte) (int, error) {
+	n, err := c.reader.Read(p)
+	if err == io.EOF {
+		c.eof = true
+	}
+	return n, err
+}
+
+func (c *commandReadCloser) Close() error {
+	if !c.eof && c.kill != nil {
 		c.kill()
 	}
 	if c.wait == nil {

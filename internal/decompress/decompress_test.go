@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"os/exec"
 	"testing"
 )
 
@@ -55,5 +56,32 @@ func TestCommandForExternalCompression(t *testing.T) {
 				t.Fatalf("CommandFor(%q) = %#v, want %#v", kind, got, want)
 			}
 		}
+	}
+}
+
+func TestZstdReaderClosesCleanlyAfterSuccessfulRead(t *testing.T) {
+	if _, err := exec.LookPath("zstd"); err != nil {
+		t.Skip("zstd not installed")
+	}
+	var compressed bytes.Buffer
+	cmd := exec.Command("zstd", "-q", "-c")
+	cmd.Stdin = bytes.NewBufferString("hello zstd")
+	cmd.Stdout = &compressed
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("zstd compress error: %v", err)
+	}
+	rc, err := NewReader("zstd", &compressed)
+	if err != nil {
+		t.Fatalf("NewReader error: %v", err)
+	}
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if string(got) != "hello zstd" {
+		t.Fatalf("got %q", got)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
 	}
 }

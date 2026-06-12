@@ -16,6 +16,8 @@ stream-download
 
 `COMPRESSION=auto` is the default and detects `.tar.gz`, `.tgz`, `.tar.zst`, `.tar.zstd`, `.tar.lz4`, `.tar.xz`, `.txz`, and `.tar`.
 
+`RESTORE_SNAPSHOT` defaults to `true`; set it to `false` only when intentionally disabling the initContainer restore.
+
 ## S3-Compatible Restore
 
 ```bash
@@ -42,7 +44,7 @@ volumeMounts:
     mountPath: /scratch
 ```
 
-For multi-hundred-GiB or multi-TiB snapshots, prefer a scratch PVC. If using `emptyDir`, set pod and initContainer `ephemeral-storage` requests and limits above `DOWNLOAD_WINDOW_BYTES`.
+For multi-hundred-GiB or multi-TiB snapshots, prefer a scratch PVC. If using `emptyDir`, set pod and initContainer `ephemeral-storage` requests and limits above `DOWNLOAD_WINDOW_BYTES`. The range downloader caps active scratch files to roughly `DOWNLOAD_WINDOW_BYTES / RANGE_SIZE`; `DOWNLOAD_CONCURRENCY` is the upper bound.
 
 Range downloads retry transient short reads and unexpected EOFs up to `MAX_RETRIES` before the restore fails. A pod restart starts extraction over from the compressed stream because the full archive is not kept on disk; stale staging from the failed attempt is cleaned automatically.
 
@@ -55,9 +57,6 @@ SUBPATH=
 SCRATCH_DIR=/scratch
 
 SNAPSHOT_URL=https://example.com/snapshot.tar.zst
-SNAPSHOT_URLS=
-SOURCE_TYPE=auto
-
 S3_ENDPOINT_URL=
 S3_BUCKET=
 S3_KEY=
@@ -83,7 +82,6 @@ MAX_RETRIES=3
 STALL_TIMEOUT=10m
 WIPE_EXISTING=false
 REQUIRE_MOUNTPOINT=true
-PROGRESS_STATE_FILE=
 ```
 
 ## Safety
@@ -96,9 +94,11 @@ By default, the target restore path must be empty. Set `WIPE_EXISTING=true` only
 
 The published container runs as UID/GID `1000:1000`. In Kubernetes, set volume ownership with `fsGroup: 1000` or an equivalent initContainer.
 
+`REQUIRE_MOUNTPOINT=true` is the default. The tool fails before network access unless `DIR` is a mounted volume. Set it to `false` only for local tests or controlled non-Kubernetes usage.
+
 ## Integrity
 
-`CHECKSUM_SHA256` verifies the compressed archive byte stream. For multipart snapshots, the checksum applies to the concatenated part stream in extraction order.
+`CHECKSUM_SHA256` verifies the compressed archive byte stream.
 
 Set `REQUIRE_CHECKSUM=true` for strict production environments. When enabled, startup fails before any network request unless `CHECKSUM_SHA256` is set.
 

@@ -13,6 +13,12 @@ func TestLoadRestoreFalseSkipsWithoutTargetValidation(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsToRestoreAndRequiresConfig(t *testing.T) {
+	if _, err := LoadFromMap(map[string]string{}); err == nil {
+		t.Fatalf("LoadFromMap succeeded without restore config")
+	}
+}
+
 func TestLoadRejectsUnsafeSubpath(t *testing.T) {
 	env := validEnv()
 	env["SUBPATH"] = "../escape"
@@ -43,12 +49,35 @@ func TestSnapshotURLsTakePrecedence(t *testing.T) {
 	env := validEnv()
 	env["SNAPSHOT_URL"] = "https://example.invalid/one.tar.zst"
 	env["SNAPSHOT_URLS"] = "https://example.invalid/a.part0000,https://example.invalid/a.part0001"
-	cfg, err := LoadFromMap(env)
-	if err != nil {
-		t.Fatalf("LoadFromMap returned error: %v", err)
+	_, err := LoadFromMap(env)
+	if err == nil {
+		t.Fatalf("LoadFromMap succeeded for unsupported multipart URLs")
 	}
-	if len(cfg.SnapshotURLs) != 2 {
-		t.Fatalf("SnapshotURLs len = %d, want 2", len(cfg.SnapshotURLs))
+}
+
+func TestLoadRejectsInvalidInteger(t *testing.T) {
+	env := validEnv()
+	env["DOWNLOAD_CONCURRENCY"] = "sixteen"
+	if _, err := LoadFromMap(env); err == nil {
+		t.Fatalf("LoadFromMap succeeded with invalid integer")
+	}
+}
+
+func TestLoadRejectsInvalidBoolean(t *testing.T) {
+	env := validEnv()
+	env["WIPE_EXISTING"] = "maybe"
+	if _, err := LoadFromMap(env); err == nil {
+		t.Fatalf("LoadFromMap succeeded with invalid boolean")
+	}
+}
+
+func TestParseBytesSupportsTiB(t *testing.T) {
+	got, err := ParseBytes("5TiB")
+	if err != nil {
+		t.Fatalf("ParseBytes returned error: %v", err)
+	}
+	if got != 5*1024*1024*1024*1024 {
+		t.Fatalf("ParseBytes = %d, want 5 TiB", got)
 	}
 }
 

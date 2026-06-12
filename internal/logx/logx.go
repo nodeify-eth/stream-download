@@ -73,13 +73,21 @@ func redactFields(in Fields) Fields {
 }
 
 var secretQuery = map[string]bool{
-	"x-amz-signature":      true,
-	"x-amz-credential":     true,
-	"x-amz-security-token": true,
-	"awsaccesskeyid":       true,
-	"signature":            true,
-	"token":                true,
-	"access_token":         true,
+	"x-amz-signature":       true,
+	"x-amz-credential":      true,
+	"x-amz-security-token":  true,
+	"x-goog-signature":      true,
+	"x-goog-credential":     true,
+	"x-goog-security-token": true,
+	"awsaccesskeyid":        true,
+	"sig":                   true,
+	"signature":             true,
+	"se":                    true,
+	"sp":                    true,
+	"spr":                   true,
+	"sv":                    true,
+	"token":                 true,
+	"access_token":          true,
 }
 
 var authHeaderRE = regexp.MustCompile(`(?i)(authorization:\s*)\S+(\s+\S+)?`)
@@ -98,10 +106,24 @@ func Redact(s string) string {
 				}
 			}
 			if changed {
-				u.RawQuery = q.Encode()
+				u.RawQuery = redactedRawQuery(q)
 				parts[i] = u.String()
 			}
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func redactedRawQuery(q url.Values) string {
+	parts := make([]string, 0, len(q))
+	for key, values := range q {
+		for _, value := range values {
+			if value == "[REDACTED]" {
+				parts = append(parts, url.QueryEscape(key)+"=[REDACTED]")
+			} else {
+				parts = append(parts, url.QueryEscape(key)+"="+url.QueryEscape(value))
+			}
+		}
+	}
+	return strings.Join(parts, "&")
 }

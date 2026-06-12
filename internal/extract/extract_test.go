@@ -110,3 +110,22 @@ func TestRejectSpecialFile(t *testing.T) {
 		t.Fatalf("ExtractTar succeeded, want special file error")
 	}
 }
+
+func TestExtractClampsFileMode(t *testing.T) {
+	tmp := t.TempDir()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	_ = tw.WriteHeader(&tar.Header{Name: "open", Mode: 0777, Size: 1})
+	_, _ = tw.Write([]byte("x"))
+	_ = tw.Close()
+	if err := ExtractTar(&buf, tmp, Limits{}); err != nil {
+		t.Fatalf("ExtractTar error: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(tmp, "open"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0644 {
+		t.Fatalf("mode = %o, want 0644", got)
+	}
+}

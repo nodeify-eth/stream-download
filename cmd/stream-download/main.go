@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -47,19 +48,38 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	target := filepath.Join(cfg.Dir, cfg.Subpath)
-	sourceName := snapshotSourceName(cfg)
+	if cfg.RequireMountpoint {
+		if err := restore.RequireMountpoint(cfg.Dir); err != nil {
+			return err
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src, err := sourceFromConfig(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	id, resolveErr := src.Resolve(ctx)
+	if cfg.S3Bucket != "" && resolveErr != nil {
+		return resolveErr
+	}
+	sourceName := logx.Redact(snapshotSourceName(cfg))
 	compression := compressionFor(cfg.Compression, sourceName)
 	stampPath := filepath.Join(cfg.Dir, restore.StampFileName)
 	stamp := restore.Stamp{
+		SnapshotID:  identityStamp(id),
 		Source:      sourceName,
 		Checksum:    cfg.ChecksumSHA256,
 		Target:      target,
 		Compression: compression,
-		ToolVersion: "dev",
+		ToolVersion: toolVersion,
 	}
 	if restore.StampMatches(stampPath, stamp) {
 		logger.Info("restore_already_complete", logx.Fields{"target": target})
 		return nil
+	}
+	if err := restore.CleanupInterruptedPublish(target); err != nil {
+		return err
 	}
 	staging := filepath.Join(cfg.Dir, restore.StagingDirName)
 	_ = os.RemoveAll(staging)
@@ -69,7 +89,7 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 	if err := os.MkdirAll(staging, 0755); err != nil {
 		return err
 	}
-	stream, cleanup, meta, err := openSnapshotStream(context.Background(), cfg)
+	stream, cleanup, meta, err := openSnapshotStream(ctx, cfg, src, id, resolveErr)
 	if err != nil {
 		return err
 	}
@@ -100,6 +120,7 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		startFields["message"] = fmt.Sprintf("restoring %s snapshot to %s", compression, target)
 	}
 	logger.Info("start_restore", startFields)
+	stream = newStallReader(stream, cancel, cfg.StallTimeout)
 	stream = newProgressReader(stream, logger, meta)
 
 	var checksum hash.Hash
@@ -147,6 +168,24 @@ func snapshotSourceName(cfg config.Config) string {
 	return fmt.Sprintf("s3://%s/%s", cfg.S3Bucket, cfg.S3Key)
 }
 
+var toolVersion = "dev"
+
+func identityStamp(id source.Identity) string {
+	if id.VersionID != "" {
+		return "version:" + id.VersionID
+	}
+	if id.ETag != "" {
+		return "etag:" + id.ETag
+	}
+	if id.LastModified != "" {
+		return "last-modified:" + id.LastModified
+	}
+	if id.Size > 0 {
+		return fmt.Sprintf("size:%d", id.Size)
+	}
+	return ""
+}
+
 func compressionFor(configured, snapshotURL string) string {
 	if configured != "" && configured != "auto" {
 		return configured
@@ -178,22 +217,17 @@ type streamMetadata struct {
 	rangeMode  bool
 }
 
-func openSnapshotStream(ctx context.Context, cfg config.Config) (io.Reader, func(), streamMetadata, error) {
-	src, err := sourceFromConfig(ctx, cfg)
-	if err != nil {
-		return nil, func() {}, streamMetadata{}, err
-	}
-	id, err := src.Resolve(ctx)
-	if err == nil && id.Size > 0 && canUseRangeIdentity(id, cfg.AllowWeakIdentity) {
-		rc, err := spool.StreamRanges(ctx, src, id, cfg.RangeSize, cfg.DownloadConcurrency, cfg.ScratchDir, cfg.MaxRetries)
+func openSnapshotStream(ctx context.Context, cfg config.Config, src source.Reader, id source.Identity, resolveErr error) (io.Reader, func(), streamMetadata, error) {
+	if resolveErr == nil && id.Size > 0 && canUseRangeIdentity(id, cfg.AllowWeakIdentity) {
+		rc, err := spool.StreamRanges(ctx, src, id, cfg.RangeSize, cfg.DownloadConcurrency, cfg.ScratchDir, cfg.MaxRetries, cfg.DownloadWindowBytes)
 		if err != nil {
 			return nil, func() {}, streamMetadata{}, err
 		}
 		return rc, func() { _ = rc.Close() }, streamMetadata{sourceKind: id.Kind, sourceSize: id.Size, rangeMode: true}, nil
 	}
 	if cfg.S3Bucket != "" {
-		if err != nil {
-			return nil, func() {}, streamMetadata{}, err
+		if resolveErr != nil {
+			return nil, func() {}, streamMetadata{}, resolveErr
 		}
 		return nil, func() {}, streamMetadata{}, fmt.Errorf("S3 source size must be known")
 	}
@@ -201,7 +235,7 @@ func openSnapshotStream(ctx context.Context, cfg config.Config) (io.Reader, func
 	if err != nil {
 		return nil, func() {}, streamMetadata{}, err
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := httpClient(cfg.StallTimeout).Do(req)
 	if err != nil {
 		return nil, func() {}, streamMetadata{}, err
 	}
@@ -210,7 +244,7 @@ func openSnapshotStream(ctx context.Context, cfg config.Config) (io.Reader, func
 		return nil, func() {}, streamMetadata{}, fmt.Errorf("GET returned HTTP %d", res.StatusCode)
 	}
 	size := int64(0)
-	if err == nil && id.Size > 0 {
+	if resolveErr == nil && id.Size > 0 {
 		size = id.Size
 	}
 	return res.Body, func() { _ = res.Body.Close() }, streamMetadata{sourceKind: "http", sourceSize: size}, nil
@@ -233,7 +267,16 @@ func sourceFromConfig(ctx context.Context, cfg config.Config) (source.Reader, er
 	if len(cfg.SnapshotURLs) == 0 {
 		return nil, fmt.Errorf("no snapshot URL configured")
 	}
-	return source.NewHTTP(cfg.SnapshotURLs[0], http.DefaultClient), nil
+	return source.NewHTTP(cfg.SnapshotURLs[0], httpClient(cfg.StallTimeout)), nil
+}
+
+func httpClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	transport.DialContext = dialer.DialContext
+	transport.TLSHandshakeTimeout = 30 * time.Second
+	transport.ResponseHeaderTimeout = timeout
+	return &http.Client{Transport: transport}
 }
 
 func moveChildren(src, dst string) error {
@@ -241,12 +284,19 @@ func moveChildren(src, dst string) error {
 	if err != nil {
 		return err
 	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if err := restore.WritePublishMarker(dst, names); err != nil {
+		return err
+	}
 	for _, entry := range entries {
 		if err := os.Rename(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
 			return err
 		}
 	}
-	return nil
+	return restore.ClearPublishMarker(dst)
 }
 
 type progressReader struct {
@@ -257,6 +307,37 @@ type progressReader struct {
 	lastLog  time.Time
 	read     int64
 	complete bool
+}
+
+type stallReader struct {
+	r       io.Reader
+	cancel  context.CancelFunc
+	timeout time.Duration
+	timer   *time.Timer
+}
+
+func newStallReader(r io.Reader, cancel context.CancelFunc, timeout time.Duration) io.Reader {
+	if timeout <= 0 {
+		return r
+	}
+	s := &stallReader{r: r, cancel: cancel, timeout: timeout}
+	s.timer = time.AfterFunc(timeout, cancel)
+	return s
+}
+
+func (s *stallReader) Read(b []byte) (int, error) {
+	if s.timer != nil {
+		s.timer.Reset(s.timeout)
+	}
+	n, err := s.r.Read(b)
+	if s.timer != nil {
+		if err == io.EOF {
+			s.timer.Stop()
+		} else if n > 0 {
+			s.timer.Reset(s.timeout)
+		}
+	}
+	return n, err
 }
 
 func newProgressReader(r io.Reader, logger *logx.Logger, meta streamMetadata) io.Reader {

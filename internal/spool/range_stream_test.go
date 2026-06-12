@@ -15,7 +15,7 @@ func TestStreamRangesRetriesShortRange(t *testing.T) {
 	src := &retryRangeSource{data: data}
 	id := source.Identity{Kind: "test", Size: int64(len(data)), ETag: `"retry"`}
 
-	rc, err := StreamRanges(context.Background(), src, id, 8, 2, t.TempDir(), 2)
+	rc, err := StreamRanges(context.Background(), src, id, 8, 2, t.TempDir(), 2, 16)
 	if err != nil {
 		t.Fatalf("StreamRanges error: %v", err)
 	}
@@ -30,6 +30,15 @@ func TestStreamRangesRetriesShortRange(t *testing.T) {
 	}
 	if src.attemptsFor(0) != 2 {
 		t.Fatalf("range 0 attempts = %d, want 2", src.attemptsFor(0))
+	}
+}
+
+func TestStreamRangesRejectsInvalidWindow(t *testing.T) {
+	data := []byte("abc")
+	src := &retryRangeSource{data: data}
+	id := source.Identity{Kind: "test", Size: int64(len(data)), ETag: `"retry"`}
+	if _, err := StreamRanges(context.Background(), src, id, 8, 2, t.TempDir(), 2, 0); err == nil {
+		t.Fatalf("StreamRanges succeeded with invalid window")
 	}
 }
 

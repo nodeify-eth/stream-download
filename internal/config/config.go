@@ -16,7 +16,6 @@ type Config struct {
 	ScratchDir          string
 	SnapshotURL         string
 	SnapshotURLs        []string
-	SourceType          string
 	S3EndpointURL       string
 	S3Bucket            string
 	S3Key               string
@@ -35,21 +34,39 @@ type Config struct {
 	StallTimeout        time.Duration
 	WipeExisting        bool
 	RequireMountpoint   bool
-	ProgressStateFile   string
 }
 
 func LoadFromMap(env map[string]string) (Config, error) {
+	restoreSnapshot, err := boolEnv(env, "RESTORE_SNAPSHOT", true)
+	if err != nil {
+		return Config{}, err
+	}
+	downloadConcurrency, err := intEnv(env, "DOWNLOAD_CONCURRENCY", 8)
+	if err != nil {
+		return Config{}, err
+	}
+	maxRetries, err := intEnv(env, "MAX_RETRIES", 3)
+	if err != nil {
+		return Config{}, err
+	}
+	stallTimeout, err := durationEnv(env, "STALL_TIMEOUT", 10*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	requireMountpoint, err := boolEnv(env, "REQUIRE_MOUNTPOINT", true)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
-		RestoreSnapshot:     boolEnv(env, "RESTORE_SNAPSHOT", false),
-		SourceType:          stringEnv(env, "SOURCE_TYPE", "auto"),
-		DownloadConcurrency: intEnv(env, "DOWNLOAD_CONCURRENCY", 8),
+		RestoreSnapshot:     restoreSnapshot,
+		DownloadConcurrency: downloadConcurrency,
 		DownloadWindowBytes: defaultBytes(env, "DOWNLOAD_WINDOW_BYTES", 8*1024*1024*1024),
 		RangeSize:           defaultBytes(env, "RANGE_SIZE", 256*1024*1024),
 		Compression:         stringEnv(env, "COMPRESSION", "auto"),
 		LogFormat:           stringEnv(env, "LOG_FORMAT", "text"),
-		MaxRetries:          intEnv(env, "MAX_RETRIES", 3),
-		StallTimeout:        durationEnv(env, "STALL_TIMEOUT", 10*time.Minute),
-		RequireMountpoint:   boolEnv(env, "REQUIRE_MOUNTPOINT", true),
+		MaxRetries:          maxRetries,
+		StallTimeout:        stallTimeout,
+		RequireMountpoint:   requireMountpoint,
 	}
 	if !cfg.RestoreSnapshot {
 		return cfg, nil
@@ -63,13 +80,30 @@ func LoadFromMap(env map[string]string) (Config, error) {
 	cfg.S3Bucket = strings.TrimSpace(env["S3_BUCKET"])
 	cfg.S3Key = strings.TrimSpace(env["S3_KEY"])
 	cfg.ChecksumSHA256 = strings.ToLower(strings.TrimSpace(env["CHECKSUM_SHA256"]))
-	cfg.RequireChecksum = boolEnv(env, "REQUIRE_CHECKSUM", false)
-	cfg.AllowWeakIdentity = boolEnv(env, "ALLOW_WEAK_IDENTITY", false)
-	cfg.WipeExisting = boolEnv(env, "WIPE_EXISTING", false)
-	cfg.ProgressStateFile = strings.TrimSpace(env["PROGRESS_STATE_FILE"])
+	if sourceType := strings.TrimSpace(env["SOURCE_TYPE"]); sourceType != "" && sourceType != "auto" {
+		return cfg, fmt.Errorf("SOURCE_TYPE is not supported; leave it unset or set to auto")
+	}
+	if strings.TrimSpace(env["PROGRESS_STATE_FILE"]) != "" {
+		return cfg, fmt.Errorf("PROGRESS_STATE_FILE is not supported")
+	}
+	cfg.RequireChecksum, err = boolEnv(env, "REQUIRE_CHECKSUM", false)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.AllowWeakIdentity, err = boolEnv(env, "ALLOW_WEAK_IDENTITY", false)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.WipeExisting, err = boolEnv(env, "WIPE_EXISTING", false)
+	if err != nil {
+		return cfg, err
+	}
 	cfg.MaxExtractedBytes = defaultBytes(env, "MAX_EXTRACTED_BYTES", 0)
 	cfg.MaxExtractedFiles = defaultBytes(env, "MAX_EXTRACTED_FILES", 0)
-	cfg.StripComponents = intEnv(env, "STRIP_COMPONENTS", 0)
+	cfg.StripComponents, err = intEnv(env, "STRIP_COMPONENTS", 0)
+	if err != nil {
+		return cfg, err
+	}
 
 	if err := validateAbs("DIR", cfg.Dir); err != nil {
 		return cfg, err
@@ -91,6 +125,9 @@ func LoadFromMap(env map[string]string) (Config, error) {
 			if u != "" {
 				cfg.SnapshotURLs = append(cfg.SnapshotURLs, u)
 			}
+		}
+		if len(cfg.SnapshotURLs) > 1 {
+			return cfg, errors.New("SNAPSHOT_URLS multipart restore is not supported yet; set a single SNAPSHOT_URL")
 		}
 	} else if cfg.SnapshotURL != "" {
 		cfg.SnapshotURLs = []string{cfg.SnapshotURL}
@@ -116,6 +153,9 @@ func LoadFromMap(env map[string]string) (Config, error) {
 	if cfg.DownloadConcurrency <= 0 || cfg.MaxRetries <= 0 {
 		return cfg, errors.New("DOWNLOAD_CONCURRENCY and MAX_RETRIES must be positive")
 	}
+	if cfg.StallTimeout <= 0 {
+		return cfg, errors.New("STALL_TIMEOUT must be positive")
+	}
 	if cfg.DownloadWindowBytes <= 0 || cfg.RangeSize <= 0 {
 		return cfg, errors.New("DOWNLOAD_WINDOW_BYTES and RANGE_SIZE must be positive")
 	}
@@ -139,6 +179,7 @@ func ParseBytes(s string) (int64, error) {
 	}{
 		{"KiB", 1024},
 		{"MiB", 1024 * 1024},
+		{"TiB", 1024 * 1024 * 1024 * 1024},
 		{"GiB", 1024 * 1024 * 1024},
 	}
 	for _, unit := range units {
@@ -183,37 +224,40 @@ func stringEnv(env map[string]string, key, fallback string) string {
 	return fallback
 }
 
-func boolEnv(env map[string]string, key string, fallback bool) bool {
+func boolEnv(env map[string]string, key string, fallback bool) (bool, error) {
+	if strings.TrimSpace(env[key]) == "" {
+		return fallback, nil
+	}
 	switch strings.ToLower(strings.TrimSpace(env[key])) {
 	case "1", "true", "yes", "y":
-		return true
+		return true, nil
 	case "0", "false", "no", "n":
-		return false
+		return false, nil
 	default:
-		return fallback
+		return false, fmt.Errorf("%s must be boolean", key)
 	}
 }
 
-func intEnv(env map[string]string, key string, fallback int) int {
+func intEnv(env map[string]string, key string, fallback int) (int, error) {
 	if strings.TrimSpace(env[key]) == "" {
-		return fallback
+		return fallback, nil
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(env[key]))
 	if err != nil {
-		return fallback
+		return 0, fmt.Errorf("%s must be an integer", key)
 	}
-	return n
+	return n, nil
 }
 
-func durationEnv(env map[string]string, key string, fallback time.Duration) time.Duration {
+func durationEnv(env map[string]string, key string, fallback time.Duration) (time.Duration, error) {
 	if strings.TrimSpace(env[key]) == "" {
-		return fallback
+		return fallback, nil
 	}
 	d, err := time.ParseDuration(strings.TrimSpace(env[key]))
 	if err != nil {
-		return fallback
+		return 0, fmt.Errorf("%s must be a duration", key)
 	}
-	return d
+	return d, nil
 }
 
 func defaultBytes(env map[string]string, key string, fallback int64) int64 {

@@ -14,6 +14,17 @@ func TestRedactURLSecrets(t *testing.T) {
 	}
 }
 
+func TestRedactCommonCloudSignatures(t *testing.T) {
+	input := "https://host/snapshot?X-Goog-Signature=secret&sig=azure&safe=value"
+	got := Redact(input)
+	if strings.Contains(got, "secret") || strings.Contains(got, "azure") {
+		t.Fatalf("Redact leaked cloud signature: %s", got)
+	}
+	if !strings.Contains(got, "safe=value") {
+		t.Fatalf("Redact removed safe query value: %s", got)
+	}
+}
+
 func TestRedactAuthorizationHeader(t *testing.T) {
 	got := Redact("Authorization: Bearer secret-token")
 	if strings.Contains(got, "secret-token") {
