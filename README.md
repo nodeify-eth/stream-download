@@ -44,7 +44,7 @@ volumeMounts:
     mountPath: /scratch
 ```
 
-For multi-hundred-GiB or multi-TiB snapshots, prefer a scratch PVC. If using `emptyDir`, set pod and initContainer `ephemeral-storage` requests and limits above `DOWNLOAD_WINDOW_BYTES`. The range downloader caps active scratch files to roughly `DOWNLOAD_WINDOW_BYTES / RANGE_SIZE`; `DOWNLOAD_CONCURRENCY` is the upper bound.
+For multi-hundred-GiB or multi-TiB snapshots, prefer a scratch PVC. If using `emptyDir`, set pod and initContainer `ephemeral-storage` requests and limits above `DOWNLOAD_CONCURRENCY * RANGE_SIZE`. `DOWNLOAD_WINDOW_BYTES` is optional; set it only when you want a lower scratch cap than full configured concurrency.
 
 Range downloads retry transient short reads and unexpected EOFs up to `MAX_RETRIES` before the restore fails. A pod restart starts extraction over from the compressed stream because the full archive is not kept on disk; stale staging from the failed attempt is cleaned automatically.
 
@@ -70,7 +70,7 @@ REQUIRE_CHECKSUM=false
 ALLOW_WEAK_IDENTITY=false
 
 DOWNLOAD_CONCURRENCY=8
-DOWNLOAD_WINDOW_BYTES=8GiB
+DOWNLOAD_WINDOW_BYTES=
 RANGE_SIZE=256MiB
 MAX_EXTRACTED_BYTES=
 MAX_EXTRACTED_FILES=

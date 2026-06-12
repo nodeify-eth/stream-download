@@ -103,6 +103,33 @@ func TestLoadStripComponents(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsDownloadWindowToConcurrencyTimesRange(t *testing.T) {
+	env := validEnv()
+	env["DOWNLOAD_CONCURRENCY"] = "16"
+	env["RANGE_SIZE"] = "1GiB"
+	cfg, err := LoadFromMap(env)
+	if err != nil {
+		t.Fatalf("LoadFromMap returned error: %v", err)
+	}
+	if cfg.DownloadWindowBytes != 16*1024*1024*1024 {
+		t.Fatalf("DownloadWindowBytes = %d, want 16GiB", cfg.DownloadWindowBytes)
+	}
+}
+
+func TestLoadAllowsExplicitSmallerDownloadWindow(t *testing.T) {
+	env := validEnv()
+	env["DOWNLOAD_CONCURRENCY"] = "16"
+	env["RANGE_SIZE"] = "1GiB"
+	env["DOWNLOAD_WINDOW_BYTES"] = "8GiB"
+	cfg, err := LoadFromMap(env)
+	if err != nil {
+		t.Fatalf("LoadFromMap returned error: %v", err)
+	}
+	if cfg.DownloadWindowBytes != 8*1024*1024*1024 {
+		t.Fatalf("DownloadWindowBytes = %d, want 8GiB", cfg.DownloadWindowBytes)
+	}
+}
+
 func TestLoadRejectsAmbiguousHTTPAndS3Config(t *testing.T) {
 	env := validEnv()
 	env["S3_BUCKET"] = "snapshots"

@@ -60,7 +60,6 @@ func LoadFromMap(env map[string]string) (Config, error) {
 	cfg := Config{
 		RestoreSnapshot:     restoreSnapshot,
 		DownloadConcurrency: downloadConcurrency,
-		DownloadWindowBytes: defaultBytes(env, "DOWNLOAD_WINDOW_BYTES", 8*1024*1024*1024),
 		RangeSize:           defaultBytes(env, "RANGE_SIZE", 256*1024*1024),
 		Compression:         stringEnv(env, "COMPRESSION", "auto"),
 		LogFormat:           stringEnv(env, "LOG_FORMAT", "text"),
@@ -68,6 +67,7 @@ func LoadFromMap(env map[string]string) (Config, error) {
 		StallTimeout:        stallTimeout,
 		RequireMountpoint:   requireMountpoint,
 	}
+	cfg.DownloadWindowBytes = defaultBytes(env, "DOWNLOAD_WINDOW_BYTES", int64(cfg.DownloadConcurrency)*cfg.RangeSize)
 	if !cfg.RestoreSnapshot {
 		return cfg, nil
 	}
