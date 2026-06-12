@@ -140,6 +140,13 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		_ = dr.Close()
 		return err
 	}
+	// Tar readers can stop at the archive end marker before the decompressor
+	// process has closed stdout. Drain the decompressor after a clean tar EOF so
+	// Close waits for a normal process exit instead of killing it.
+	if _, err := io.Copy(io.Discard, dr); err != nil {
+		_ = dr.Close()
+		return err
+	}
 	if err := dr.Close(); err != nil {
 		return err
 	}
