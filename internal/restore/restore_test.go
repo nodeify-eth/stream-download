@@ -61,6 +61,17 @@ func TestPrepareTargetAllowsStampOnlyTarget(t *testing.T) {
 	}
 }
 
+func TestPrepareTargetAllowsStagingOnlyTarget(t *testing.T) {
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "data")
+	if err := os.MkdirAll(filepath.Join(target, StagingDirName, "partial"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareTarget(target, false); err != nil {
+		t.Fatalf("PrepareTarget error: %v", err)
+	}
+}
+
 func TestPrepareTargetWipeExisting(t *testing.T) {
 	tmp := t.TempDir()
 	target := filepath.Join(tmp, "data")

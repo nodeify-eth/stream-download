@@ -8,6 +8,7 @@ import (
 )
 
 const StampFileName = ".stream-download.stamp"
+const StagingDirName = ".stream-download-staging"
 
 type Stamp struct {
 	SnapshotID  string `json:"snapshot_id"`
@@ -73,7 +74,7 @@ func PrepareTarget(target string, wipe bool) error {
 func hasNoRestoredContent(entries []os.DirEntry) bool {
 	for _, entry := range entries {
 		switch entry.Name() {
-		case "lost+found", StampFileName:
+		case "lost+found", StampFileName, StagingDirName:
 			continue
 		default:
 			return false

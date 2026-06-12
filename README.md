@@ -44,6 +44,8 @@ volumeMounts:
 
 For multi-hundred-GiB or multi-TiB snapshots, prefer a scratch PVC. If using `emptyDir`, set pod and initContainer `ephemeral-storage` requests and limits above `DOWNLOAD_WINDOW_BYTES`.
 
+Range downloads retry transient short reads and unexpected EOFs up to `MAX_RETRIES` before the restore fails. A pod restart starts extraction over from the compressed stream because the full archive is not kept on disk; stale staging from the failed attempt is cleaned automatically.
+
 ## Important Environment Variables
 
 ```bash

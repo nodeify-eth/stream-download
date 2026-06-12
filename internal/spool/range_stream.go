@@ -16,7 +16,7 @@ type rangeResult struct {
 	err   error
 }
 
-func StreamRanges(ctx context.Context, src source.Reader, id source.Identity, rangeSize int64, concurrency int, scratchDir string) (io.ReadCloser, error) {
+func StreamRanges(ctx context.Context, src source.Reader, id source.Identity, rangeSize int64, concurrency int, scratchDir string, maxRetries int) (io.ReadCloser, error) {
 	if id.Size <= 0 {
 		return nil, fmt.Errorf("source size must be known for range streaming")
 	}
@@ -26,16 +26,19 @@ func StreamRanges(ctx context.Context, src source.Reader, id source.Identity, ra
 	if concurrency <= 0 {
 		return nil, fmt.Errorf("concurrency must be positive")
 	}
+	if maxRetries <= 0 {
+		return nil, fmt.Errorf("max retries must be positive")
+	}
 	if err := os.MkdirAll(scratchDir, 0700); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	pr, pw := io.Pipe()
-	go streamRanges(ctx, cancel, src, id, rangeSize, concurrency, scratchDir, pw)
+	go streamRanges(ctx, cancel, src, id, rangeSize, concurrency, scratchDir, maxRetries, pw)
 	return pr, nil
 }
 
-func streamRanges(ctx context.Context, cancel context.CancelFunc, src source.Reader, id source.Identity, rangeSize int64, concurrency int, scratchDir string, pw *io.PipeWriter) {
+func streamRanges(ctx context.Context, cancel context.CancelFunc, src source.Reader, id source.Identity, rangeSize int64, concurrency int, scratchDir string, maxRetries int, pw *io.PipeWriter) {
 	defer cancel()
 	total := int((id.Size + rangeSize - 1) / rangeSize)
 	results := make(chan rangeResult, concurrency)
@@ -46,7 +49,7 @@ func streamRanges(ctx context.Context, cancel context.CancelFunc, src source.Rea
 	start := func(index int) {
 		active++
 		go func() {
-			results <- downloadRange(ctx, src, id, rangeSize, scratchDir, index)
+			results <- downloadRange(ctx, src, id, rangeSize, scratchDir, index, maxRetries)
 		}()
 	}
 	fill := func() {
@@ -96,7 +99,22 @@ func streamRanges(ctx context.Context, cancel context.CancelFunc, src source.Rea
 	_ = pw.Close()
 }
 
-func downloadRange(ctx context.Context, src source.Reader, id source.Identity, rangeSize int64, scratchDir string, index int) rangeResult {
+func downloadRange(ctx context.Context, src source.Reader, id source.Identity, rangeSize int64, scratchDir string, index int, maxRetries int) rangeResult {
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		res := downloadRangeOnce(ctx, src, id, rangeSize, scratchDir, index)
+		if res.err == nil {
+			return res
+		}
+		lastErr = res.err
+		if ctx.Err() != nil {
+			return res
+		}
+	}
+	return rangeResult{index: index, err: fmt.Errorf("range %d failed after %d attempt(s): %w", index, maxRetries, lastErr)}
+}
+
+func downloadRangeOnce(ctx context.Context, src source.Reader, id source.Identity, rangeSize int64, scratchDir string, index int) rangeResult {
 	start := int64(index) * rangeSize
 	end := start + rangeSize - 1
 	if end >= id.Size {
@@ -111,6 +129,7 @@ func downloadRange(ctx context.Context, src source.Reader, id source.Identity, r
 
 	tmp := filepath.Join(scratchDir, fmt.Sprintf("range-%06d.tmp", index))
 	final := filepath.Join(scratchDir, fmt.Sprintf("range-%06d", index))
+	_ = os.Remove(tmp)
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return rangeResult{index: index, err: err}

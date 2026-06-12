@@ -61,11 +61,11 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		logger.Info("restore_already_complete", logx.Fields{"target": target})
 		return nil
 	}
+	staging := filepath.Join(cfg.Dir, restore.StagingDirName)
+	_ = os.RemoveAll(staging)
 	if err := restore.PrepareTarget(target, cfg.WipeExisting); err != nil {
 		return err
 	}
-	staging := filepath.Join(cfg.Dir, ".stream-download-staging")
-	_ = os.RemoveAll(staging)
 	if err := os.MkdirAll(staging, 0755); err != nil {
 		return err
 	}
@@ -185,7 +185,7 @@ func openSnapshotStream(ctx context.Context, cfg config.Config) (io.Reader, func
 	}
 	id, err := src.Resolve(ctx)
 	if err == nil && id.Size > 0 && canUseRangeIdentity(id, cfg.AllowWeakIdentity) {
-		rc, err := spool.StreamRanges(ctx, src, id, cfg.RangeSize, cfg.DownloadConcurrency, cfg.ScratchDir)
+		rc, err := spool.StreamRanges(ctx, src, id, cfg.RangeSize, cfg.DownloadConcurrency, cfg.ScratchDir, cfg.MaxRetries)
 		if err != nil {
 			return nil, func() {}, streamMetadata{}, err
 		}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/nodeify-eth/stream-download/internal/logx"
+	"github.com/nodeify-eth/stream-download/internal/restore"
 	"github.com/nodeify-eth/stream-download/internal/source"
 )
 
@@ -118,6 +119,41 @@ func TestRunStripsPathComponents(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "a")); !os.IsNotExist(err) {
 		t.Fatalf("unstripped parent exists or stat failed: %v", err)
+	}
+}
+
+func TestRunRemovesStaleStagingBeforeTargetCheck(t *testing.T) {
+	archive := gzipTar(t, "db/file.txt", "restart")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(filepath.Join(dir, restore.StagingDirName, "partial"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL,
+		"COMPRESSION":        "gzip",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "db/file.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if string(got) != "restart" {
+		t.Fatalf("restored file = %q", got)
 	}
 }
 
