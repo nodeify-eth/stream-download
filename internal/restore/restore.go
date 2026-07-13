@@ -83,15 +83,26 @@ func CleanupInterruptedPublish(target string) error {
 	return ClearPublishMarker(target)
 }
 
-func StampMatches(path string, want Stamp) bool {
+func ReadStamp(path string) (Stamp, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return Stamp{}, false
 	}
 	var got Stamp
 	if err := json.Unmarshal(data, &got); err != nil {
+		return Stamp{}, false
+	}
+	return got, true
+}
+
+func StampMatches(path string, want Stamp) bool {
+	got, ok := ReadStamp(path)
+	if !ok {
 		return false
 	}
+	// The restored data does not depend on which tool version wrote it.
+	got.ToolVersion = ""
+	want.ToolVersion = ""
 	return got == want
 }
 
