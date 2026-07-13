@@ -78,6 +78,23 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		logger.Info("restore_already_complete", logx.Fields{"target": target})
 		return nil
 	}
+	// Snapshot providers rotate old objects out of their buckets. If the source
+	// can no longer be resolved, a prior completed restore of the same source is
+	// still valid — trust the stamp instead of demanding a wipe.
+	if stamp.SnapshotID == "" {
+		if prior, ok := restore.ReadStamp(stampPath); ok {
+			prior.SnapshotID, prior.ToolVersion = "", ""
+			want := stamp
+			want.ToolVersion = ""
+			if prior == want {
+				logger.Info("restore_already_complete", logx.Fields{
+					"target":  target,
+					"message": "source no longer resolvable; trusting existing restore stamp",
+				})
+				return nil
+			}
+		}
+	}
 	if err := restore.CleanupInterruptedPublish(target); err != nil {
 		return err
 	}

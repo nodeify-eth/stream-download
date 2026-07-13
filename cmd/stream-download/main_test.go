@@ -609,3 +609,78 @@ func gzipTar(t *testing.T, name, contents string) []byte {
 	_ = gw.Close()
 	return gz.Bytes()
 }
+
+func TestRunTrustsStampWhenSourceRotated(t *testing.T) {
+	archive := gzipTar(t, "chaindata/file.txt", "hello")
+	gone := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gone {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("ETag", `"snap"`)
+		if r.Method == http.MethodHead {
+			return
+		}
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL + "/snapshot.tar.gz",
+		"COMPRESSION":        "gzip",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("first run error: %v", err)
+	}
+	stamp, ok := restore.ReadStamp(filepath.Join(dir, restore.StampFileName))
+	if !ok || stamp.SnapshotID == "" {
+		t.Fatalf("first run stamp = %+v, want resolved snapshot id", stamp)
+	}
+
+	gone = true
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("second run error: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "chaindata/file.txt"))
+	if err != nil || string(got) != "hello" {
+		t.Fatalf("restored data disturbed: %q, %v", got, err)
+	}
+}
+
+func TestRunSkipsRestoreAcrossToolVersions(t *testing.T) {
+	archive := gzipTar(t, "chaindata/file.txt", "hello")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"snap"`)
+		if r.Method == http.MethodHead {
+			return
+		}
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL + "/snapshot.tar.gz",
+		"COMPRESSION":        "gzip",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("first run error: %v", err)
+	}
+
+	prev := toolVersion
+	toolVersion = prev + "-next"
+	defer func() { toolVersion = prev }()
+	if err := run(env, os.Stdout, os.Stderr); err != nil {
+		t.Fatalf("run after version bump error: %v", err)
+	}
+}
