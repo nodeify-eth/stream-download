@@ -83,13 +83,21 @@ func CleanupInterruptedPublish(target string) error {
 	return ClearPublishMarker(target)
 }
 
-func StampMatches(path string, want Stamp) bool {
+func ReadStamp(path string) (Stamp, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return Stamp{}, err
 	}
 	var got Stamp
 	if err := json.Unmarshal(data, &got); err != nil {
+		return Stamp{}, err
+	}
+	return got, nil
+}
+
+func StampMatches(path string, want Stamp) bool {
+	got, err := ReadStamp(path)
+	if err != nil {
 		return false
 	}
 	return got == want

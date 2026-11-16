@@ -521,23 +521,405 @@ func TestRunSkipsWhenCompletionStampMatches(t *testing.T) {
 		"SNAPSHOT_URL":       srv.URL,
 		"COMPRESSION":        "gzip",
 		"REQUIRE_MOUNTPOINT": "false",
+		"LOG_FORMAT":         "json",
 	}
-	if err := run(env, os.Stdout, os.Stderr); err != nil {
+	if err := run(env, io.Discard, io.Discard); err != nil {
 		t.Fatalf("first run error: %v", err)
 	}
-	if err := run(env, os.Stdout, os.Stderr); err != nil {
+	var stdout bytes.Buffer
+	if err := run(env, &stdout, io.Discard); err != nil {
 		t.Fatalf("second run error: %v", err)
 	}
 	if getCount != 1 {
 		t.Fatalf("GET count = %d, want 1", getCount)
 	}
+	if !strings.Contains(stdout.String(), `"event":"restore_already_complete"`) {
+		t.Fatalf("restore_already_complete missing: %s", stdout.String())
+	}
+}
+
+func TestRunSkipsWhenStampPresentAndSourceReturns404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing snapshot", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	payload := filepath.Join(dir, "bor", "chaindata")
+	if err := os.MkdirAll(filepath.Dir(payload), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(payload, []byte("synced"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(dir, restore.StagingDirName, "partial")
+	if err := os.MkdirAll(staging, 0755); err != nil {
+		t.Fatal(err)
+	}
+	snapshotURL := srv.URL + "/snapshot.tar.zst?X-Amz-Signature=secret"
+	if err := restore.WriteStamp(filepath.Join(dir, restore.StampFileName), restore.Stamp{
+		SnapshotID:  `etag:"prior-snap"`,
+		Source:      snapshotURL,
+		Target:      dir,
+		Compression: "zstd",
+		ToolVersion: toolVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       snapshotURL,
+		"COMPRESSION":        "zstd",
+		"REQUIRE_MOUNTPOINT": "false",
+		"LOG_FORMAT":         "json",
+	}
+	if err := run(env, &stdout, io.Discard); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, `"level":"warn"`) || !strings.Contains(out, `"event":"restore_skipped_source_unavailable"`) {
+		t.Fatalf("skip warning missing: %s", out)
+	}
+	if !strings.Contains(out, `prior-snap`) || !strings.Contains(out, "HEAD returned HTTP 404") || !strings.Contains(out, "snapshot.tar.zst") || !strings.Contains(out, "[REDACTED]") {
+		t.Fatalf("skip log missing stamp identity, source, or resolve error: %s", out)
+	}
+	if strings.Contains(out, "secret") {
+		t.Fatalf("skip log leaked secret: %s", out)
+	}
+	if strings.Contains(out, `"event":"start_restore"`) {
+		t.Fatalf("restore started: %s", out)
+	}
+	got, err := os.ReadFile(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "synced" {
+		t.Fatalf("target changed: %q", got)
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Fatalf("staging was touched: %v", err)
+	}
+}
+
+func TestRunErrorsWhenInvalidStampAndSourceReturns404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing snapshot", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	payload := filepath.Join(dir, "bor", "chaindata")
+	if err := os.MkdirAll(filepath.Dir(payload), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(payload, []byte("synced"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, restore.StampFileName), []byte("{not-json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := run(map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL + "/snapshot.tar.zst",
+		"COMPRESSION":        "zstd",
+		"REQUIRE_MOUNTPOINT": "false",
+	}, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("run succeeded, want error")
+	}
+	got, readErr := os.ReadFile(payload)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "synced" {
+		t.Fatalf("target changed: %q", got)
+	}
+}
+
+func TestRunErrorsWhenSourceReturns404WithoutStamp(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing snapshot", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL + "/snapshot.tar.zst",
+		"COMPRESSION":        "zstd",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	err := run(env, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("run succeeded, want error")
+	}
+	if strings.Contains(err.Error(), "restore_skipped_source_unavailable") {
+		t.Fatalf("fresh restore skipped: %v", err)
+	}
+}
+
+func TestRunAlreadyCompleteWhenExistingStampMatchesSource(t *testing.T) {
+	var getCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"same-snap"`)
+		w.Header().Set("Content-Length", "128")
+		if r.Method == http.MethodHead {
+			return
+		}
+		getCount++
+		http.Error(w, "should not download", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	payload := filepath.Join(dir, "bor", "chaindata")
+	if err := os.MkdirAll(filepath.Dir(payload), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(payload, []byte("synced"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	snapshotURL := srv.URL + "/snapshot.tar.zst"
+	if err := restore.WriteStamp(filepath.Join(dir, restore.StampFileName), restore.Stamp{
+		SnapshotID:  `etag:"same-snap"`,
+		Source:      snapshotURL,
+		Target:      dir,
+		Compression: "zstd",
+		ToolVersion: toolVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       snapshotURL,
+		"COMPRESSION":        "zstd",
+		"REQUIRE_MOUNTPOINT": "false",
+		"LOG_FORMAT":         "json",
+	}
+	if err := run(env, &stdout, io.Discard); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if getCount != 0 {
+		t.Fatalf("GET count = %d, want 0", getCount)
+	}
+	if !strings.Contains(stdout.String(), `"event":"restore_already_complete"`) {
+		t.Fatalf("restore_already_complete missing: %s", stdout.String())
+	}
+	got, err := os.ReadFile(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "synced" {
+		t.Fatalf("target changed: %q", got)
+	}
+}
+
+func TestRunKeepsWipeCheckWhenResolvedSnapshotDiffers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"new-snap"`)
+		w.Header().Set("Content-Length", "128")
+		if r.Method != http.MethodHead {
+			t.Errorf("unexpected %s before wipe check", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	payload := filepath.Join(dir, "bor", "chaindata")
+	if err := os.MkdirAll(filepath.Dir(payload), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(payload, []byte("synced"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restore.WriteStamp(filepath.Join(dir, restore.StampFileName), restore.Stamp{
+		SnapshotID:  `etag:"prior-snap"`,
+		Source:      srv.URL + "/snapshot.tar.zst",
+		Target:      dir,
+		Compression: "zstd",
+		ToolVersion: toolVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL + "/snapshot.tar.zst",
+		"COMPRESSION":        "zstd",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	err := run(env, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "WIPE_EXISTING=true") {
+		t.Fatalf("run error = %v, want non-empty target error", err)
+	}
+	got, readErr := os.ReadFile(payload)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "synced" {
+		t.Fatalf("target changed: %q", got)
+	}
+}
+
+func TestRunSkipsWhenStampPresentAndIdentityEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		t.Errorf("unexpected %s", r.Method)
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	payload := filepath.Join(dir, "chaindata")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(payload, []byte("synced"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restore.WriteStamp(filepath.Join(dir, restore.StampFileName), restore.Stamp{
+		SnapshotID:  `etag:"prior-snap"`,
+		Source:      srv.URL + "/snapshot.tar.zst",
+		Target:      dir,
+		Compression: "zstd",
+		ToolVersion: toolVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       srv.URL + "/snapshot.tar.zst",
+		"COMPRESSION":        "zstd",
+		"REQUIRE_MOUNTPOINT": "false",
+		"LOG_FORMAT":         "json",
+	}
+	if err := run(env, &stdout, io.Discard); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, `"event":"restore_skipped_source_unavailable"`) || !strings.Contains(out, "prior-snap") {
+		t.Fatalf("skip log missing: %s", out)
+	}
+	if !strings.Contains(out, "snapshot identity is empty") {
+		t.Fatalf("skip log missing empty identity: %s", out)
+	}
+	got, err := os.ReadFile(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "synced" {
+		t.Fatalf("target changed: %q", got)
+	}
+}
+
+func TestRunSkipsWhenStampPresentAndS3ResolveFails(t *testing.T) {
+	original := newS3Source
+	t.Cleanup(func() { newS3Source = original })
+	newS3Source = func(ctx context.Context, bucket, key, endpoint string) (source.Reader, error) {
+		return fakeSource{resolveErr: fmt.Errorf("HeadObject https://s3.example/snapshots/snapshot.tar.zst?X-Amz-Signature=secret: NotFound")}, nil
+	}
+
+	dir := filepath.Join(t.TempDir(), "data")
+	payload := filepath.Join(dir, "bor", "chaindata")
+	if err := os.MkdirAll(filepath.Dir(payload), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(payload, []byte("synced"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restore.WriteStamp(filepath.Join(dir, restore.StampFileName), restore.Stamp{
+		SnapshotID:  "version:prior",
+		Source:      "s3://snapshots/snapshot.tar.zst",
+		Target:      dir,
+		Compression: "zstd",
+		ToolVersion: toolVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"S3_ENDPOINT_URL":    "https://s3.example",
+		"S3_BUCKET":          "snapshots",
+		"S3_KEY":             "snapshot.tar.zst",
+		"REQUIRE_MOUNTPOINT": "false",
+		"LOG_FORMAT":         "json",
+	}
+	if err := run(env, &stdout, io.Discard); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, `"level":"warn"`) || !strings.Contains(out, `"event":"restore_skipped_source_unavailable"`) || !strings.Contains(out, "version:prior") || !strings.Contains(out, "s3://snapshots/snapshot.tar.zst") {
+		t.Fatalf("skip log missing: %s", out)
+	}
+	if strings.Contains(out, "secret") || !strings.Contains(out, "[REDACTED]") {
+		t.Fatalf("resolve error was not redacted: %s", out)
+	}
+	got, err := os.ReadFile(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "synced" {
+		t.Fatalf("target changed: %q", got)
+	}
+}
+
+func TestRunErrorsWhenS3ResolveFailsWithoutStamp(t *testing.T) {
+	original := newS3Source
+	t.Cleanup(func() { newS3Source = original })
+	newS3Source = func(ctx context.Context, bucket, key, endpoint string) (source.Reader, error) {
+		return fakeSource{resolveErr: fmt.Errorf("HeadObject NotFound")}, nil
+	}
+
+	env := map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                filepath.Join(t.TempDir(), "data"),
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"S3_ENDPOINT_URL":    "https://s3.example",
+		"S3_BUCKET":          "snapshots",
+		"S3_KEY":             "snapshot.tar.zst",
+		"REQUIRE_MOUNTPOINT": "false",
+	}
+	err := run(env, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "NotFound") {
+		t.Fatalf("run error = %v, want NotFound", err)
+	}
 }
 
 type fakeSource struct {
-	data []byte
+	data       []byte
+	resolveErr error
 }
 
 func (f fakeSource) Resolve(context.Context) (source.Identity, error) {
+	if f.resolveErr != nil {
+		return source.Identity{}, f.resolveErr
+	}
 	return source.Identity{Kind: "fake", URL: "fake://snapshot", Size: int64(len(f.data)), ETag: `"fake"`}, nil
 }
 
