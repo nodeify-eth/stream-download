@@ -14,6 +14,15 @@ type HTTP struct {
 	client *http.Client
 }
 
+type HTTPStatusError struct {
+	Method string
+	Status int
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s returned HTTP %d", e.Method, e.Status)
+}
+
 func NewHTTP(url string, client *http.Client) *HTTP {
 	if client == nil {
 		client = http.DefaultClient
@@ -32,7 +41,7 @@ func (h *HTTP) Resolve(ctx context.Context) (Identity, error) {
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return Identity{}, fmt.Errorf("HEAD returned HTTP %d", res.StatusCode)
+		return Identity{}, &HTTPStatusError{Method: http.MethodHead, Status: res.StatusCode}
 	}
 	size, _ := strconv.ParseInt(res.Header.Get("Content-Length"), 10, 64)
 	etag := res.Header.Get("ETag")

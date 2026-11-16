@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -60,9 +61,6 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 		return err
 	}
 	id, resolveErr := src.Resolve(ctx)
-	if cfg.S3Bucket != "" && resolveErr != nil {
-		return resolveErr
-	}
 	sourceName := logx.Redact(snapshotSourceName(cfg))
 	compression := compressionFor(cfg.Compression, sourceName)
 	stampPath := filepath.Join(cfg.Dir, restore.StampFileName)
@@ -77,6 +75,15 @@ func run(env map[string]string, stdout, stderr io.Writer) error {
 	if restore.StampMatches(stampPath, stamp) {
 		logger.Info("restore_already_complete", logx.Fields{"target": target})
 		return nil
+	}
+	if sourceUnresolved(id, resolveErr) {
+		if recorded, err := restore.ReadStamp(stampPath); err == nil {
+			logger.Warn("restore_skipped_source_unavailable", sourceUnavailableFields(recorded, resolveErr))
+			return nil
+		}
+	}
+	if cfg.S3Bucket != "" && resolveErr != nil {
+		return resolveErr
 	}
 	if err := restore.CleanupInterruptedPublish(target); err != nil {
 		return err
@@ -176,6 +183,38 @@ func snapshotSourceName(cfg config.Config) string {
 }
 
 var toolVersion = "dev"
+
+func sourceUnresolved(id source.Identity, resolveErr error) bool {
+	if resolveErr == nil {
+		return identityStamp(id) == ""
+	}
+	var status *source.HTTPStatusError
+	if errors.As(resolveErr, &status) && status.Method == http.MethodHead && headStatusAllowsGET(status.Status) {
+		return false
+	}
+	return true
+}
+
+func headStatusAllowsGET(status int) bool {
+	switch status {
+	case http.StatusForbidden, http.StatusMethodNotAllowed:
+		return true
+	default:
+		return false
+	}
+}
+
+func sourceUnavailableFields(recorded restore.Stamp, resolveErr error) logx.Fields {
+	resolveError := "snapshot identity is empty"
+	if resolveErr != nil {
+		resolveError = resolveErr.Error()
+	}
+	return logx.Fields{
+		"source":      recorded.Source,
+		"snapshot_id": recorded.SnapshotID,
+		"error":       resolveError,
+	}
+}
 
 func identityStamp(id source.Identity) string {
 	if id.VersionID != "" {
