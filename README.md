@@ -92,7 +92,7 @@ Set `STRIP_COMPONENTS` to remove leading archive path components during extracti
 
 By default, the target restore path must be empty. Set `WIPE_EXISTING=true` only when replacing an existing datadir is intentional.
 
-If `DIR` already holds a valid completion stamp and the source cannot be resolved (the resolve request fails, or the response has no snapshot identity), the tool logs `restore_skipped_source_unavailable` and exits successfully without changing the target. A fresh restore with no stamp still fails when the source is unreachable. A source that resolves to a different snapshot than the stamp follows the normal restore path, including the `WIPE_EXISTING` check.
+If `DIR` already holds a valid completion stamp and the source cannot be resolved (the resolve request fails, or the response has no snapshot identity), the tool logs `restore_skipped_source_unavailable` and exits successfully without changing the target. A fresh restore with no stamp still fails when the source is unreachable. A source that resolves to a different snapshot than the stamp follows the normal restore path, including the `WIPE_EXISTING` check. HTTP 403 and 405 from HEAD are not treated as a missing source: restore continues with GET and the same wipe check.
 
 The published container runs as UID/GID `1000:1000`. In Kubernetes, set volume ownership with `fsGroup: 1000` or an equivalent initContainer.
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -184,7 +185,23 @@ func snapshotSourceName(cfg config.Config) string {
 var toolVersion = "dev"
 
 func sourceUnresolved(id source.Identity, resolveErr error) bool {
-	return resolveErr != nil || identityStamp(id) == ""
+	if resolveErr == nil {
+		return identityStamp(id) == ""
+	}
+	var status *source.HTTPStatusError
+	if errors.As(resolveErr, &status) && status.Method == http.MethodHead && headStatusAllowsGET(status.Status) {
+		return false
+	}
+	return true
+}
+
+func headStatusAllowsGET(status int) bool {
+	switch status {
+	case http.StatusForbidden, http.StatusMethodNotAllowed:
+		return true
+	default:
+		return false
+	}
 }
 
 func sourceUnavailableFields(recorded restore.Stamp, resolveErr error) logx.Fields {

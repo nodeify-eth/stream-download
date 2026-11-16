@@ -605,6 +605,131 @@ func TestRunSkipsWhenStampPresentAndSourceReturns404(t *testing.T) {
 	}
 }
 
+func TestRunKeepsGETFallbackWhenHEADRejectsRequest(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		wipe   bool
+	}{
+		{name: "forbidden", status: http.StatusForbidden, wipe: true},
+		{name: "method_not_allowed", status: http.StatusMethodNotAllowed, wipe: true},
+		{name: "method_not_allowed_without_wipe", status: http.StatusMethodNotAllowed, wipe: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			archive := gzipTar(t, "db/file.txt", "from-get")
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead {
+					w.WriteHeader(tc.status)
+					return
+				}
+				_, _ = w.Write(archive)
+			}))
+			defer srv.Close()
+
+			dir := filepath.Join(t.TempDir(), "data")
+			old := filepath.Join(dir, "old.txt")
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(old, []byte("old"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			snapshotURL := srv.URL + "/snapshot.tar.gz"
+			if err := restore.WriteStamp(filepath.Join(dir, restore.StampFileName), restore.Stamp{
+				SnapshotID:  `etag:"prior-snap"`,
+				Source:      snapshotURL,
+				Target:      dir,
+				Compression: "gzip",
+				ToolVersion: toolVersion,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{
+				"RESTORE_SNAPSHOT":   "true",
+				"DIR":                dir,
+				"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+				"SNAPSHOT_URL":       snapshotURL,
+				"COMPRESSION":        "gzip",
+				"REQUIRE_MOUNTPOINT": "false",
+				"WIPE_EXISTING":      "false",
+			}
+			if tc.wipe {
+				env["WIPE_EXISTING"] = "true"
+			}
+			err := run(env, io.Discard, io.Discard)
+			if !tc.wipe {
+				if err == nil || !strings.Contains(err.Error(), "WIPE_EXISTING=true") {
+					t.Fatalf("run error = %v, want non-empty target error", err)
+				}
+				got, readErr := os.ReadFile(old)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if string(got) != "old" {
+					t.Fatalf("target changed: %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("run error: %v", err)
+			}
+			got, readErr := os.ReadFile(filepath.Join(dir, "db/file.txt"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(got) != "from-get" {
+				t.Fatalf("restored file = %q", got)
+			}
+		})
+	}
+}
+
+func TestRunDoesNotWipeWhenStampedSourceReturns404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing snapshot", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "data")
+	payload := filepath.Join(dir, "bor", "chaindata")
+	if err := os.MkdirAll(filepath.Dir(payload), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(payload, []byte("synced"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	snapshotURL := srv.URL + "/snapshot.tar.zst"
+	if err := restore.WriteStamp(filepath.Join(dir, restore.StampFileName), restore.Stamp{
+		SnapshotID:  `etag:"prior-snap"`,
+		Source:      snapshotURL,
+		Target:      dir,
+		Compression: "zstd",
+		ToolVersion: toolVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := run(map[string]string{
+		"RESTORE_SNAPSHOT":   "true",
+		"DIR":                dir,
+		"SCRATCH_DIR":        filepath.Join(t.TempDir(), "scratch"),
+		"SNAPSHOT_URL":       snapshotURL,
+		"COMPRESSION":        "zstd",
+		"REQUIRE_MOUNTPOINT": "false",
+		"WIPE_EXISTING":      "true",
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	got, readErr := os.ReadFile(payload)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "synced" {
+		t.Fatalf("target changed: %q", got)
+	}
+}
+
 func TestRunErrorsWhenInvalidStampAndSourceReturns404(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing snapshot", http.StatusNotFound)
